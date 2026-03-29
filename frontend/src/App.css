@@ -1,0 +1,125 @@
+.app {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 1.5rem;
+}
+
+.app-header {
+  margin-bottom: 1rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  margin-bottom: 1rem;
+  min-height: 200px;
+  max-height: min(52vh, 420px);
+  padding-right: 0.25rem;
+}
+
+.empty-state {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  text-align: center;
+  padding: 2rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.bubble {
+  max-width: 92%;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  font-size: 0.95rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: var(--user-bubble);
+  border: 1px solid var(--border);
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: var(--assistant-bubble);
+  border: 1px solid var(--border);
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.composer textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.composer textarea:disabled {
+  opacity: 0.6;
+}
+
+.composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.composer-actions .error {
+  flex: 1;
+  font-size: 0.8rem;
+  color: var(--danger);
+  margin: 0;
+  text-align: left;
+}
+
+button.send {
+  padding: 0.55rem 1.25rem;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(165deg, var(--accent), var(--accent-dim));
+  color: #04120f;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.send:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+button.send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

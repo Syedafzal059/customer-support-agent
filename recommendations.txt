@@ -1,0 +1,38 @@
+================================================================================
+RAG / CUSTOMER SUPPORT AGENT — RECOMMENDATIONS (SHORTLIST)
+================================================================================
+
+CHUNKING
+--------
+1. Semantic / recursive: split by headings/paragraphs first, then by token size (LangChain RecursiveCharacterTextSplitter or similar) — best for docs with structure.
+2. Fixed-size with overlap: e.g. 256–512 tokens, 10–20% overlap — simple baseline; tune overlap so answers are not cut mid-fact.
+3. Sentence-aware windowing: chunk on sentence boundaries within a max token budget — reduces broken sentences vs naive fixed windows.
+
+EMBEDDING MODELS (API / CLOUD)
+------------------------------
+1. OpenAI: text-embedding-3-small (cost/latency) vs text-embedding-3-large (quality); same API, pick by recall vs budget.
+2. Cohere embed-v3 or Voyage-* — strong on retrieval benchmarks; good if you already use those vendors.
+3. Azure OpenAI embeddings — same families as OpenAI with enterprise controls; pair with same chunking/index you use locally.
+
+VECTOR DATABASES (PRODUCTION)
+-----------------------------
+1. Pinecone — managed, scales well, minimal ops; pay-per-use; good default for “ship fast, scale later.”
+2. Weaviate or Qdrant — self-host or cloud; strong filtering/hybrid; Qdrant often chosen for cost control at scale.
+3. Azure AI Search (vector + lexical) — natural if stack is Azure; hybrid search out of the box.
+
+REDIS (CACHING / SESSION / RATE LIMIT)
+--------------------------------------
+1. Redis Stack / Redis Cloud — use for response cache (query+KB hash), session, rate limits; enable persistence (AOF/RDB) for non-ephemeral data.
+2. ElastiCache for Redis (AWS) or Azure Cache for Redis — managed HA, VPC integration, backups — default for production on those clouds.
+3. Keep Redis for hot paths only; do not replace the vector DB — use separate Redis for cache vs optional vector module if you adopt Redis vector features (know limits vs Pinecone/Qdrant).
+
+RETRIEVAL / INDEXING APPROACHES
+-------------------------------
+1. Hybrid search: BM25 (lexical) + dense vectors, fused (e.g. RRF or weighted) — improves exact term matches vs embeddings alone.
+2. Re-ranking: retrieve top-k with vector (or hybrid), then re-rank with a cross-encoder (e.g. ms-marco MiniLM, bge-reranker) or API reranker — best quality/cost tradeoff for small k.
+3. Two-stage “hyde”-style (optional): generate a hypothetical answer embedding for the query, then retrieve — can help paraphrase gap; adds latency/cost; use only if baseline retrieval is weak.
+
+================================================================================
+Notes: Start with one chunking strategy + one embedding family + hybrid + rerank;
+      scale vector DB and Redis per traffic and compliance (region, VPC).
+================================================================================

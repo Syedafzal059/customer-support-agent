@@ -1,0 +1,346 @@
+
+Problem Statement/Prompt:
+
+Create a customer support agent which will have access to “KnowledgeBase”. The customer invokes an AI agent to initiate a chat related to their issue.  Customers might provide a reference ticket. Agents should be able to retrieve Ticket details from System of Record (Assume Jira or other similar system), identify relevant information from knowledge base and address customer concerns
+
+
+
+🚀 PHASE 0 — PROJECT SETUP
+You are a senior backend engineer.
+
+Create a production-ready FastAPI project called "customer-support-ai".
+
+Structure:
+- app/main.py
+- app/api/routes.py
+- app/api/schemas.py
+- app/core/config.py
+- app/core/logger.py
+- configs/config.yaml
+- .env
+- requirements.txt
+
+Requirements:
+- Use FastAPI
+- Add /health endpoint
+- Load config from YAML
+- Load secrets from .env using python-dotenv
+- Add structured logging
+- Keep code modular and clean (no over-engineering)
+
+Also generate:
+- requirements.txt with all dependencies
+- basic README instructions to run the server
+
+Keep everything minimal but production-style.
+🚀 PHASE 1 — CHAT API
+You are extending an existing FastAPI project.
+
+Add a POST /chat endpoint.
+
+Request:
+{
+  "user_id": "string",
+  "message": "string"
+}
+
+Response:
+{
+  "response": "string"
+}
+
+Requirements:
+- Define Pydantic models
+- Add logging for incoming requests
+- Return dummy response: "Received: {message}"
+- Keep logic clean and separated in routes.py
+- Do not mix business logic here (keep it thin controller)
+
+Ensure code is modular and testable.
+🚀 PHASE 2 — REDIS MEMORY + CACHE
+You are a senior backend engineer.
+
+Add a memory and caching layer that uses the same key patterns and semantics as Redis, so we can swap to a real Redis server later without rewriting call sites.
+
+Infrastructure note (implemented default):
+- Use an in-process, thread-safe hash map backend (`MemoryStore` in `redis_client.py`) — no Redis install or Docker required for local MVP.
+- Data lives in RAM only; restarting the app clears memory. Optional env: `REDIS_BACKEND=memory` (default in `configs/config.yaml`).
+- Future: set `redis.backend: redis` and wire a real Redis client using `redis.url` / `REDIS_URL` when you want persistence or multi-instance deployment.
+
+Create:
+- app/memory/redis_client.py  — `MemoryStore` + singleton accessor; list + string operations used by chat/cache
+- app/memory/chat_memory.py   — `get_chat_history`, `append_message`, `get_cache`, `set_cache` (Redis-style keys)
+
+Requirements:
+
+1. Storage connection (config-driven):
+   - `redis.backend: memory` (default) → use `MemoryStore`
+   - Reserved: `redis.backend: redis` + URL when a real server is added
+
+2. Chat history:
+- Key: chat:{user_id}
+- Store last 5 messages only
+- Functions:
+    - get_chat_history(user_id, store)
+    - append_message(user_id, role, message, store)
+
+3. Cache:
+- Key: cache:{query_hash}
+- Functions:
+    - get_cache(query, store)
+    - set_cache(query, response, store)
+
+4. Integrate into /chat:
+- Load chat history (before recording this turn)
+- Append user message, build reply, append assistant message
+- Log prior history count (optional); cache helpers available for later phases (orchestrator / Phase 9)
+
+Keep implementation simple and clean (MVP level).
+🚀 PHASE 3 — INTENT CLASSIFIER
+You are designing an LLM-based intent classification module.
+
+Create:
+- app/orchestrator/intent_classifier.py — calls LLM with history + current message
+- app/llm/prompts.py — all prompts (intent few-shots live here; add RAG/ticket prompts in later phases)
+- app/llm/client.py — OpenAI wrapper with structured parse (`beta.chat.completions.parse`)
+- app/llm/schemas.py — Pydantic models for structured outputs (e.g. `IntentClassification`)
+
+Requirements:
+
+Two intents only:
+- "question" — route to RAG / knowledge base (documentation, how-to, policies, general troubleshooting without a concrete ticket key).
+- "ticket" — route to ticket system API (status/details of a specific issue key like ABC-123, case/ticket follow-up).
+
+Logic:
+- LLM-based (not rule-based). Provide few-shot guidance in the system prompt.
+- Inputs: **recent chat history** (prior turns) + **current user message**.
+- Output (structured): `intent` ("question" | "ticket"), `confidence` (0–1), `rationale` (short string for logs).
+
+Integrate into /chat flow:
+- Run classification before persisting the new user turn (history excludes current message).
+- Log intent, confidence, and rationale (structured logging).
+
+Config / secrets:
+- Model name in `configs/config.yaml` under `llm.intent_classifier_model` (env override: `OPENAI_INTENT_MODEL`).
+- `OPENAI_API_KEY` in `.env`; optional `OPENAI_BASE_URL` for Azure or proxies (`llm.openai_base_url`).
+
+Keep prompts maintainable in `prompts.py`; extend the same file as new LLM features are added.
+🚀 PHASE 4 — AGENT ORCHESTRATOR
+You are building the core decision engine.
+
+Create:
+- app/orchestrator/agent.py
+
+Responsibilities:
+
+1. Load chat history from Phase 2 store (MemoryStore when `redis.backend: memory`, or Redis when wired)
+2. Check cache first → return if hit
+3. Call intent classifier
+4. Route logic:
+
+- question → RAG / knowledge path (placeholder until Phase 5+)
+- ticket → ticket API path (placeholder until Phase 6+)
+
+Response format:
+{
+  "response": "...",
+  "source": "question|ticket"
+}
+
+Keep:
+- Clean separation of concerns
+- No heavy logic in API layer
+- Logging at each step
+
+Make this the central brain of the system.
+🚀 PHASE 5 — FAISS (KNOWLEDGE BASE)
+You are implementing a simple RAG retrieval system.
+
+Create:
+- app/retrieval/faiss_store.py
+- app/retrieval/embeddings.py
+- app/retrieval/chunking.py (tiktoken-based chunk boundaries)
+
+Requirements:
+
+1. Load documents from:
+   data/knowledge_base/
+
+2. Chunking:
+- size: 400 tokens
+- overlap: 50
+
+3. Generate embeddings via **Hugging Face** models using `sentence-transformers` (not OpenAI embeddings for this project).
+   - Default **`BAAI/bge-base-en-v1.5`**: solid tradeoff between **MTEB leaderboard** retrieval quality and speed/size (~109M, 768-d). See https://huggingface.co/spaces/mteb/leaderboard and https://mteb.info/
+   - Faster / lighter option: **`BAAI/bge-small-en-v1.5`** (~33M, 384-d) — set `embeddings.model_id` or env `EMBEDDING_MODEL_ID`
+   - Implementation: `app/retrieval/embeddings.py` (`embed_texts`, lazy model load); config in `configs/config.yaml` under `embeddings`
+
+4. Store in FAISS index
+
+5. Implement:
+   search(query, top_k=3)
+
+6. Return relevant chunks as text
+
+7. Integrate into orchestrator:
+- If intent == "question" → call FAISS search
+
+Keep it simple and working (no over-optimization).
+🚀 PHASE 6 — MOCK JIRA
+You are integrating a mock ticket system.
+
+Create:
+- app/integrations/jira_mock.py
+
+Requirements:
+
+1. Function:
+   get_ticket(ticket_id)
+
+2. Return mock JSON:
+{
+  "id": "ABC-123",
+  "status": "In Progress",
+  "priority": "High",
+  "summary": "Login issue"
+}
+
+3. ticket_id comes from the intent classifier structured output (LLM); orchestrator does not parse the user message with regex
+
+4. Integrate into orchestrator:
+- If intent == "ticket" → fetch ticket
+
+5. Return structured ticket response
+
+Keep it simple and realistic.
+🚀 PHASE 7 — LLM + ROUTER
+You are adding LLM intelligence.
+
+Create:
+- app/llm/router.py (model selection per task; `client.py` and `prompts.py` started in Phase 3)
+
+Requirements:
+
+1. LLM Router:
+- question (RAG) → model suited for grounded QA (or cheap model for simple follow-ups — your choice)
+- ticket → model suited for summarization / structured ticket narrative
+
+2. Prompt templates (add to `app/llm/prompts.py` alongside intent classifier):
+- RAG context QA
+- Ticket summarization (and any “direct answer” templates if needed)
+
+3. LLM client:
+- Already: OpenAI wrapper in `client.py`; extend if needed (timeouts, retries — Phase 10)
+
+4. Integrate:
+- question → RAG-based prompt (+ FAISS context)
+- ticket → summarization / ticket-aware prompt
+
+Keep prompts clean and practical.
+🚀 PHASE 8 — FULL RAG PIPELINE
+You are improving the KB pipeline into full RAG.
+
+Requirements:
+
+1. For "question" intent (RAG):
+- Retrieve top 3 chunks from FAISS
+- Combine into context
+
+2. Build prompt using:
+- context
+- chat history
+- user query
+
+3. Ensure:
+- Response is grounded in context
+- If answer not found → say "I don't know"
+
+4. Update orchestrator accordingly
+
+Focus on correctness over complexity.
+🚀 PHASE 9 — CACHING OPTIMIZATION
+You are optimizing performance with caching.
+
+Requirements:
+
+1. Before processing:
+- Check cache via Phase 2 layer (same backend: memory or Redis)
+
+2. After response:
+- Store response in cache (same layer)
+
+3. Use hashed query as key
+
+4. Add logs:
+- Cache hit
+- Cache miss
+
+Keep it lightweight and efficient.
+🚀 PHASE 10 — ERROR HANDLING
+You are adding production-grade resilience (MVP level).
+
+Requirements:
+
+1. Wrap:
+- LLM calls
+- Jira calls
+- FAISS calls
+
+2. Handle:
+- Timeout
+- Exceptions
+
+3. Return fallback:
+"System is busy, please try again later"
+
+4. Add structured logging:
+- Errors
+- Latency
+
+Do not over-engineer.
+🚀 PHASE 11 — FRONTEND (VITE + REACT)
+You are a senior frontend engineer.
+
+Create:
+- `frontend/` — React app bootstrapped with **Vite** (see `frontend/package.json`)
+
+Requirements:
+
+1. **Chat UI**
+   - Stable `user_id` persisted in `localStorage` (no session field shown in the UI)
+   - Message list (user vs assistant) and composer (Enter to send, Shift+Enter for newline)
+   - Customer-facing copy only (no API URL, env hints, or debug fields like `source` / `cached` / `intent` in the UI)
+
+2. **API integration**
+   - `POST {VITE_API_URL}/chat` with `{ user_id, message }` (default API base `http://127.0.0.1:8000`)
+   - Configure via `frontend/.env` / `.env.local`: `VITE_API_URL=...` (see `frontend/.env.example`)
+
+3. **Backend CORS**
+   - FastAPI `CORSMiddleware` with origins from `configs/config.yaml` → `server.cors_origins` (include UI on 127.0.0.1:5173 and any other local ports you use)
+   - Override with env `CORS_ORIGINS` (comma-separated) if needed
+
+4. **Run**
+   - API: from project root, `uvicorn app.main:app --host 127.0.0.1 --port 8000`
+   - UI: `cd frontend && npm install && npm run dev` → **http://127.0.0.1:5173** (`vite build --watch` + static `serve`, not `npx vite`, so `%` in a parent path does not break the tooling)
+
+Keep styling readable and distinct from generic “AI slop”; no extra frameworks unless you outgrow this scope.
+🚀 BONUS — FEEDBACK LOOP
+You are adding a feedback system.
+
+Add endpoint:
+
+POST /feedback
+
+Request:
+{
+  "query": "...",
+  "response": "...",
+  "rating": 1-5
+}
+
+Requirements:
+- Store in Phase 2 store (memory/Redis) or JSON file
+- Log feedback for evaluation
+- Keep implementation minimal
+
+This will be used for future model improvement.

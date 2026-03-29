@@ -1,0 +1,43 @@
+app:
+  name: customer-support-ai
+  debug: false
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  # Phase 11: browser origins (Vite dev :5173, vite preview :4173)
+  cors_origins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+    - "http://localhost:4173"
+    - "http://127.0.0.1:4173"
+
+logging:
+  level: "INFO"
+  # When true, log full chat message text (PII — use only for local debugging).
+  log_chat_message_body: false
+
+# redis.backend: memory = in-process dict (no Redis install). Use "redis" when you add a real server later.
+redis:
+  backend: "memory"
+  url: "redis://localhost:6379/0"
+
+# LLM (Phase 3+). API key: OPENAI_API_KEY in .env. Optional: OPENAI_BASE_URL for Azure/proxy.
+llm:
+  intent_classifier_model: "gpt-4o-mini"
+  # Phase 7: grounded KB answers (Phase 8 rules in prompts) and ticket narrative
+  rag_qa_model: "gpt-4o-mini"
+  ticket_summary_model: "gpt-4o-mini"
+  openai_base_url: ""
+
+# Phase 5 RAG: Hugging Face weights via sentence-transformers. Leaderboard: https://huggingface.co/spaces/mteb/leaderboard
+# Default bge-base-en-v1.5 balances MTEB retrieval quality vs speed/size; override with bge-small-en-v1.5 if you need faster CPU.
+embeddings:
+  model_id: "BAAI/bge-base-en-v1.5"
+
+# Phase 5: KB path relative to project root; chunking uses tiktoken (cl100k) as token proxy.
+rag:
+  knowledge_base_dir: "data/knowledge_base"
+  chunk_size_tokens: 400
+  chunk_overlap_tokens: 50
+  top_k: 3

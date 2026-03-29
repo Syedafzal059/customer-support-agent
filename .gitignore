@@ -1,0 +1,24 @@
+.env
+.env.local
+.env.*.local
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+.DS_Store
+Thumbs.db
+
+# Phase 11 — Vite + React
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
