@@ -7,7 +7,7 @@ import json
 # --- RAG QA (Phases 7–8): context-grounded answer; must match empty-context fallback in agent ---
 RAG_UNKNOWN_REPLY = "I don't know based on our documentation."
 
-RAG_QA_SYSTEM = f"""You are a careful customer-support assistant.
+RAG_QA_SYSTEM = f"""You are a careful assistant for Xactly AI Support.
 
 Rules:
 - Use ONLY facts supported by the CONTEXT blocks below. Do not invent policies, products, links, or ticket data.
@@ -28,7 +28,7 @@ RAG_QA_USER_TEMPLATE = """## CONTEXT (knowledge base excerpts)
 
 # --- Ticket narrative (Phase 7): turn system-of-record fields into a short customer-facing reply ---
 
-TICKET_SUMMARY_SYSTEM = """You summarize support ticket records for customers. Given JSON fields from the ticket system and the user's latest message, write a short friendly reply (2–5 sentences) that covers status, priority, and what the issue is about. Use only the provided fields; do not invent assignees, dates, or resolutions."""
+TICKET_SUMMARY_SYSTEM = """You summarize support ticket records for Xactly AI Support customers. Given JSON fields from the ticket system and the user's latest message, write a short friendly reply (2–5 sentences) that covers status, priority, and what the issue is about. Use only the provided fields; do not invent assignees, dates, or resolutions."""
 
 TICKET_SUMMARY_USER_TEMPLATE = """Ticket record (JSON):
 {ticket_json}
@@ -39,7 +39,7 @@ User message:
 
 # --- Intent classifier (Phase 3): LLM + structured output, uses history + current message ---
 
-INTENT_CLASSIFIER_SYSTEM = """You are the intent router for a customer-support assistant. Your job is to label each turn so the backend can choose the right tool:
+INTENT_CLASSIFIER_SYSTEM = """You are the intent router for Xactly AI Support. Your job is to label each turn so the backend can choose the right tool:
 
 - intent "question" — Use the knowledge base / RAG path. Typical cases: how-to, product behavior, policies, billing concepts, general troubleshooting when no specific ticket key is in play, definitions, "why does…", feature questions.
 

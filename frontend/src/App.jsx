@@ -82,7 +82,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Support chat</h1>
+        <h1>Xactly AI Support</h1>
       </header>
 
       <div className="messages" ref={messagesRef} aria-live="polite">

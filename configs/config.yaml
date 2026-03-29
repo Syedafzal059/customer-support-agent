@@ -1,5 +1,5 @@
 app:
-  name: customer-support-ai
+  name: Xactly AI Support
   debug: false
 
 server:

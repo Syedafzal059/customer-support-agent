@@ -115,7 +115,7 @@ def get_settings() -> AppSettings:
     rag_top_k = int(os.getenv("RAG_TOP_K") or rag_cfg.get("top_k", 3))
     cors_origins = _parse_cors_origins(raw)
     return AppSettings(
-        app_name=str(app.get("name", "customer-support-ai")),
+        app_name=str(app.get("name", "Xactly AI Support")),
         debug=bool(app.get("debug", False)),
         server_host=str(server.get("host", "0.0.0.0")),
         server_port=int(server.get("port", 8000)),

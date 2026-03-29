@@ -1,11 +1,11 @@
-# Customer Support AI
+# Xactly AI Support
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 
-Public repo: **[github.com/Syedafzal059/customer-support-agent](https://github.com/Syedafzal059/customer-support-agent)**
+Public repo: **[github.com/Syedafzal059/customer-support-agent](https://github.com/Syedafzal059/customer-support-agent)** (codebase folder name unchanged)
 
-A production-style **FastAPI** backend with a **React (Vite)** chat UI. The service answers support-style questions using **RAG over a local knowledge base** (FAISS + sentence-transformers) and can **summarize mock ticket data** when the user’s intent is ticket follow-up. Routing between “documentation question” and “ticket lookup” is done with an **LLM intent classifier** (OpenAI structured outputs), not hand-written rules.
+**Xactly AI Support** is a production-style **FastAPI** backend with a **React (Vite)** chat UI. The service answers support-style questions using **RAG over a local knowledge base** (FAISS + sentence-transformers) and can **summarize mock ticket data** when the user’s intent is ticket follow-up. Routing between “documentation question” and “ticket lookup” is done with an **LLM intent classifier** (OpenAI structured outputs), not hand-written rules.
 
 ---
 

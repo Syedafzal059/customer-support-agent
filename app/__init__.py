@@ -1,1 +1,1 @@
-"""customer-support-ai application package."""
+"""Xactly AI Support application package."""

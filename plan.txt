@@ -8,7 +8,7 @@ Create a customer support agent which will have access to “KnowledgeBase”. T
 🚀 PHASE 0 — PROJECT SETUP
 You are a senior backend engineer.
 
-Create a production-ready FastAPI project called "customer-support-ai".
+Create a production-ready FastAPI project (product name: Xactly AI Support; historical internal codename customer-support-ai).
 
 Structure:
 - app/main.py
