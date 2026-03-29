@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 const USER_ID_KEY = "csa_user_id";
@@ -31,7 +31,14 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const messagesRef = useRef(null);
   const baseUrl = useMemo(() => apiBaseUrl(), []);
+
+  useLayoutEffect(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+  }, [messages, loading]);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -78,7 +85,7 @@ export default function App() {
         <h1>Support chat</h1>
       </header>
 
-      <div className="messages" aria-live="polite">
+      <div className="messages" ref={messagesRef} aria-live="polite">
         {messages.length === 0 ? (
           <div className="empty-state">Send a message to get started.</div>
         ) : (

@@ -32,7 +32,14 @@ RETRIEVAL / INDEXING APPROACHES
 2. Re-ranking: retrieve top-k with vector (or hybrid), then re-rank with a cross-encoder (e.g. ms-marco MiniLM, bge-reranker) or API reranker — best quality/cost tradeoff for small k.
 3. Two-stage “hyde”-style (optional): generate a hypothetical answer embedding for the query, then retrieve — can help paraphrase gap; adds latency/cost; use only if baseline retrieval is weak.
 
+STREAMING (LLM RESPONSES)
+---------------------------
+1. SSE (Server-Sent Events): backend streams tokens after retrieval; frontend uses EventSource or fetch streaming — simple, HTTP-friendly, works well behind many proxies.
+2. WebSockets: use if you need bidirectional flow (cancel mid-stream, heartbeats, follow-up without new connection) — more moving parts than SSE.
+3. Pattern: run retrieval + context build synchronously, then stream only the generation (OpenAI/Azure `stream=True` or equivalent) — users see text quickly while quality stays RAG-grounded.
+
 ================================================================================
 Notes: Start with one chunking strategy + one embedding family + hybrid + rerank;
-      scale vector DB and Redis per traffic and compliance (region, VPC).
+      add streaming (SSE + stream generation) for UX; scale vector DB and Redis
+      per traffic and compliance (region, VPC).
 ================================================================================
