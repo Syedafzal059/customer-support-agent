@@ -178,6 +178,12 @@ Full resolution order is implemented in `app/core/config.py`.
 | `plan.txt` | Build phases |
 | `llmops_plan.txt` | LLMOps / eval roadmap (reference) |
 
+### GitHub Actions and merging to `main`
+
+Workflow **`.github/workflows/ci.yml`** (name **CI**) runs on **push** and **pull_request** to **`main`**: **lint** (Ruff), **frontend** (npm build), then **eval-regression** (`run_eval` + `regression`).
+
+By default, a **red** workflow does **not** stop merges: GitHub still allows merge/push unless you turn on **branch protection**. To **require** green CI before a PR can land on **`main`**: **Settings → Branches → Branch protection rule** for **`main`** → enable **Require status checks to pass before merging** → select the checks for jobs **`lint`**, **`frontend`**, and **`eval-regression`** (they may appear as **`CI / lint`**, etc., in the picker after at least one run). Optional: **Require branches to be up to date before merging** so the PR is tested against the latest **`main`**.
+
 ---
 
 ## Observability & evaluation
