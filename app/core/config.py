@@ -46,6 +46,8 @@ class AppSettings:
     rag_chunk_size_tokens: int
     rag_chunk_overlap_tokens: int
     rag_top_k: int
+    langsmith_enabled: bool
+    langsmith_project: str
 
 
 def _parse_cors_origins(raw: dict) -> tuple[str, ...]:
@@ -113,6 +115,16 @@ def get_settings() -> AppSettings:
         os.getenv("RAG_CHUNK_OVERLAP_TOKENS") or rag_cfg.get("chunk_overlap_tokens", 50)
     )
     rag_top_k = int(os.getenv("RAG_TOP_K") or rag_cfg.get("top_k", 3))
+    langsmith_cfg = raw.get("langsmith") or {}
+    yaml_ls_enable = bool(langsmith_cfg.get("enable", False))
+    ls_tracing_env = _env_bool("LANGSMITH_TRACING")
+    if ls_tracing_env is None:
+        ls_tracing_env = _env_bool("LANGCHAIN_TRACING_V2")
+    langsmith_enabled = ls_tracing_env if ls_tracing_env is not None else yaml_ls_enable
+    langsmith_project = (
+        (os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "").strip()
+        or str(langsmith_cfg.get("project", "") or "").strip()
+    )
     cors_origins = _parse_cors_origins(raw)
     return AppSettings(
         app_name=str(app.get("name", "Xactly AI Support")),
@@ -133,4 +145,6 @@ def get_settings() -> AppSettings:
         rag_chunk_size_tokens=chunk_size,
         rag_chunk_overlap_tokens=chunk_overlap,
         rag_top_k=rag_top_k,
+        langsmith_enabled=langsmith_enabled,
+        langsmith_project=langsmith_project,
     )

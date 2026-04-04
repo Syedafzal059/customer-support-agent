@@ -1,0 +1,454 @@
+================================================================================
+LLMOPS & PRODUCTION GENAI — IMPLEMENTATION PLAN
+Companion to plan.txt | FastAPI + React | FAISS RAG | OpenAI | Xactly AI Support
+================================================================================
+Audience: intermediate–advanced Python engineer. Incremental on existing repo.
+No execution in this document — planning only.
+
+================================================================================
+PHASE 1 — LLM EVALUATION PIPELINE (LangSmith)
+================================================================================
+
+--- Step 1.1 — Evaluation dataset (gold / reference set)
+What:
+  - Create a versioned dataset: rows = { user_id optional, message, expected_behavior
+    or reference_answer, route_expected (question|ticket), ticket_id_expected (nullable),
+    tags (edge_case types)}.
+  - Store as JSONL under e.g. eval/datasets/support_eval_v1.jsonl (or CSV + loader).
+  - Include: happy-path KB Q&A, “who are you”, off-KB (“refund policy annual”),
+    ticket with key, ticket without key, ambiguous text, very long message, PII-like strings.
+
+Why:
+  - Without a fixed dataset you cannot measure regressions or compare prompts/models.
+
+Tool:
+  - LangSmith Datasets UI + API, or local JSONL committed to repo (import to LangSmith).
+
+Code-level:
+  - Pydantic model EvalCase in app/eval/schemas.py; loader eval/load_dataset.py.
+  - Do not commit secrets; dataset can be scrubbed / synthetic.
+
+--- Step 1.2 — LangSmith tracing in FastAPI
+What:
+  - Install langsmith; set LANGCHAIN_TRACING_V2=true, LANGCHAIN_API_KEY, LANGCHAIN_PROJECT.
+  - Wrap each LLM path: intent classification, generate_rag_answer, generate_ticket_narrative.
+  - Attach metadata: user_id hash (not raw PII if policy requires), source branch, model ids,
+    chunk_count, top_k, cache_hit (boolean) — cache hits may skip LLM trace or log separately.
+
+Why:
+  - Debug production failures, inspect retrieval vs generation, audit costs per feature.
+
+Tool:
+  - LangSmith + langchain-core callbacks OR OpenAI wrapper with @traceable (LangSmith SDK).
+
+Code-level:
+  - Central place: app/llm/tracing.py configuring client; decorators on classify_intent,
+    generate_rag_answer, generate_ticket_narrative; optional middleware logging request_id
+    (UUID) into trace metadata.
+  - In RAG path, log retrieved chunk texts (truncated) or chunk ids + hashes into run inputs.
+
+--- Step 1.3 — Evaluation metrics
+What:
+  - Define explicitly:
+    a) Answer correctness: LLM-judge or exact/partial match vs reference; for ticket path,
+       schema check + key fields.
+    b) Faithfulness: judge prompt “does answer contradict context?” or RAGAS-style
+       faithfulness if you adopt RAGAS later.
+    c) Retrieval relevance: nDCG@k or binary relevance labels on retrieved chunks
+       (human or LLM judge on small set).
+
+Why:
+  - Single scalar “accuracy” is meaningless without decomposition; hallucinations hide in
+    fluent wrong answers.
+
+Tool:
+  - LangSmith Evaluations (online) + optional ragas library for RAG metrics in offline jobs.
+
+Code-level:
+  - eval/metrics.py with functions score_correctness, score_faithfulness, score_retrieval;
+    configurable judge model in env.
+
+--- Step 1.4 — Automated eval pipeline
+What:
+  - Script or job: for each EvalCase, call run_chat_turn (or HTTP POST /chat) with fixed
+    user_id namespace eval-* ; collect response, source, traces.
+  - Push results to LangSmith as evaluation runs; store run IDs in artifact or DB.
+
+Why:
+  - Repeatable CI and pre-release gates.
+
+Tool:
+  - LangSmith Python SDK (create_dataset, create_examples, run_on_dataset) OR custom runner
+    + REST.
+
+Code-level:
+  - eval/run_eval.py CLI: python -m eval.run_eval --dataset eval/datasets/... --out reports/
+  - Use test OpenAI key or separate LangSmith project “eval” to avoid polluting prod traces.
+
+--- Step 1.5 — Regression testing
+What:
+  - Baseline file: checksums or embedded golden outputs per case id for stable prompts.
+  - On each eval run, diff new vs baseline; flag drift beyond threshold (e.g. judge score
+    drop > 0.05).
+
+Why:
+  - PRs that “improve” one query must not silently break ten others.
+
+Tool:
+  - LangSmith comparison UI + local JSON diff in eval/regression_baseline.json.
+
+Code-level:
+  - eval/regression.py compares run artifacts; exit code 1 on regression for CI.
+
+================================================================================
+PHASE 2 — EXPERIMENT TRACKING (Weights & Biases)
+================================================================================
+
+--- Step 2.1 — Log hyperparameters and artifacts metadata
+What:
+  - On each experiment run (prompt change, model change, top_k change): wandb.init with
+    config block: intent_model, rag_model, ticket_model, temperatures, top_k, chunk_size,
+    embedding_model_id, prompt_version tags (git sha + prompt file hash).
+
+Why:
+  - Reproducibility: “which prompt + model produced this metric?”
+
+Tool:
+  - wandb (Weights & Biases).
+
+Code-level:
+  - app/llm/experiments.py thin wrapper: start_run(config_dict), log_metrics, finish.
+  - Call from eval/run_eval.py only (avoid logging every chat in prod unless sampled).
+
+--- Step 2.2 — Log metrics from evals
+What:
+  - After LangSmith or local eval: wandb.log({ correctness_mean, faithfulness_mean,
+    retrieval_ndcg, p95_latency_ms, total_tokens, cost_estimate_usd }).
+
+Why:
+  - Single dashboard for model/prompt comparisons.
+
+Tool:
+  - wandb.log
+
+Code-level:
+  - Parse LangSmith export or your eval JSON; single sync step at end of run.
+
+--- Step 2.3 — Dashboards
+What:
+  - W&B panels: line charts over time (commit sha on x-axis optional), bar charts comparing
+    “prompt_v2 vs prompt_v3”, table of runs.
+
+Why:
+  - Stakeholder visibility without opening LangSmith for every question.
+
+Tool:
+  - W&B UI Reports.
+
+Code-level:
+  - Group runs by group="rag-experiments"; tags=["hybrid-off","hybrid-on"].
+
+--- Step 2.4 — Bridge LangSmith ↔ W&B
+What:
+  - Nightly or on-demand job: pull LangSmith run summaries (API), aggregate metrics, wandb.log.
+
+Why:
+  - LangSmith = trace detail; W&B = experiment comparison at team level.
+
+Tool:
+  - LangSmith REST API + small Python script jobs/sync_langsmith_to_wandb.py.
+
+================================================================================
+PHASE 3 — PROMPT VERSIONING & MODEL LIFECYCLE (MLflow)
+================================================================================
+
+--- Step 3.1 — Versioned prompt artifacts
+What:
+  - Move prompt strings to files prompts/intent_v1.txt, prompts/rag_qa_v1.txt OR keep
+    prompts.py but generate hashed bundles mlflow.log_artifact("prompts_bundle/").
+
+Why:
+  - Git tracks source; MLflow tracks *what was deployed* with a model run.
+
+Tool:
+  - MLflow Tracking + Artifacts.
+
+Code-level:
+  - scripts/package_prompts.py copies app/llm/prompts.py + YAML snapshot into dist/prompts/
+    and logs as artifact with run name prompt-{git_sha}.
+
+--- Step 3.2 — Track model + prompt combination
+What:
+  - MLflow run params: OPENAI model names + prompt_artifact_uri + embedding_model_id +
+    faiss_index_version (chunk count hash).
+
+Why:
+  - Roll forward/rollback ties “model weights” (N/A for API models) to *configuration*.
+
+Tool:
+  - mlflow.start_run(log_params=...).
+
+Code-level:
+  - On release tag, CI job registers an MLflow “model” that is actually a PythonModel wrapper
+    exporting env manifest (not necessarily the FAISS index binary in MLflow — large); store
+    index hash in params and rebuild from KB in prod from same commit.
+
+--- Step 3.3 — Rollback mechanism
+What:
+  - Deployed service reads MLFLOW_MODEL_URI or CONFIG_VERSION env; previous version URI kept
+    in Parameter Store / k8s ConfigMap; switch env var to rollback.
+
+Why:
+  - Fast mitigation without code revert when only config/prompt regressed.
+
+Tool:
+  - MLflow Model Registry stages (Staging/Production) + your orchestrator (K8s, etc.).
+
+Code-level:
+  - Document in README; optional FastAPI dependency loads “active prompt version” from S3/MLflow
+    at startup (cache with TTL).
+
+--- Step 3.4 — Experiment comparison
+What:
+  - Use MLflow UI compare runs side-by-side; same metrics as Phase 2 also logged to MLflow
+    for parity.
+
+Why:
+  - MLflow excels at param diff; LangSmith excels at traces — use both deliberately.
+
+================================================================================
+PHASE 4 — PRODUCTION MONITORING (Helicone)
+================================================================================
+
+--- Step 4.1 — Proxy OpenAI through Helicone
+What:
+  - Set base_url to https://oai.helicone.ai/v1 (or current Helicone OpenAI proxy URL) with
+    Helicone-Auth header (HELI_API_KEY) and Helicone-Property-* for user/session/route tags.
+
+Why:
+  - Central cost, latency, error logs without changing application logic much.
+
+Tool:
+  - Helicone + OpenAI-compatible client.
+
+Code-level:
+  - In get_openai_client(settings): if settings.helicone_enabled, set base_url + default_headers.
+  - Map orchestrator branch to Helicone-Property-Branch: question|ticket.
+
+--- Step 4.2 — Dashboards
+What:
+  - Helicone dashboards: requests/day, p50/p95 latency, tokens, estimated cost, 4xx/5xx rates,
+    filter by property.
+
+Why:
+  - Ops visibility separate from experiment tooling.
+
+Tool:
+  - Helicone UI.
+
+Code-level:
+  - Ensure stable property keys from app version / git sha for release correlation.
+
+--- Step 4.3 — Alerting
+What:
+  - Helicone webhooks or export to Datadog/Grafana if supported; threshold alerts on error
+    rate or latency SLO breach.
+
+Why:
+  - Pagerduty-style response for API degradation.
+
+Tool:
+  - Helicone alerts (if available) or periodic job querying Helicone API → Slack webhook.
+
+================================================================================
+PHASE 5 — FEEDBACK LOOP SYSTEM
+================================================================================
+
+--- Step 5.1 — Persist feedback (extend plan bonus)
+What:
+  - Implement POST /feedback { query_hash or message_id, response_snippet_hash, rating 1-5,
+    thumbs optional, comment optional } — store in Redis/MemoryStore or append-only JSONL in
+    data/feedback/ (with PII policy).
+
+Why:
+  - Closes loop from user pain to dataset improvement.
+
+Tool:
+  - Existing MemoryStore pattern + new keys feedback:{date} or feedback_events.jsonl.
+
+Code-level:
+  - app/api/routes.py + schemas; frontend small thumbs component calling /feedback.
+
+--- Step 5.2 — Log bad responses
+What:
+  - Define rule: rating <= 2 OR thumbs down → enqueue row for human review queue (file or DB).
+
+Why:
+  - Prioritize labeling effort.
+
+Tool:
+  - Simple queue file or LangSmith annotation queue import.
+
+--- Step 5.3 — Feed eval dataset
+What:
+  - Weekly job: promote anonymized bad cases + model output + retrieved context into
+    eval/datasets/support_eval_vNEXT.jsonl; open PR for review.
+
+Why:
+  - Eval set stays aligned with real failures.
+
+Tool:
+  - Script jobs/promote_feedback_to_eval.py.
+
+--- Step 5.4 — Prompt improvement process
+What:
+  - Human triage → edit prompts → run Phase 1 regression → merge if green.
+
+Why:
+  - Prevents prompt thrashing without measurement.
+
+================================================================================
+PHASE 6 — CI/CD FOR LLM SYSTEM (GitHub Actions)
+================================================================================
+
+--- Step 6.1 — CI pipeline skeleton
+What:
+  - .github/workflows/ci.yml: on pull_request, jobs: lint (ruff/black), test (pytest if added),
+    build-frontend (npm ci && npm run build), eval-smoke (optional heavy job on label
+    run-full-eval).
+
+Why:
+  - Fast feedback on every PR.
+
+Tool:
+  - GitHub Actions.
+
+Code-level:
+  - Cache pip + npm; secrets: OPENAI_API_KEY_EVAL, LANGCHAIN_API_KEY in repo secrets.
+
+--- Step 6.2 — Eval on PR
+What:
+  - Job eval: checkout, pip install, run eval/run_eval.py --dataset small_regression.jsonl,
+    upload report artifact.
+
+Why:
+  - Gate merges on measurable quality.
+
+Tool:
+  - Same eval runner as Phase 1.5.
+
+Code-level:
+  - Fail workflow if regression.py reports FAIL or mean faithfulness < threshold (configure
+    in eval/config.yaml).
+
+--- Step 6.3 — Deploy gate
+What:
+  - CD workflow (on main): run full eval suite → deploy container only if pass; blue/green
+    optional.
+
+Why:
+  - Prod only receives vetted commits.
+
+Tool:
+  - GitHub Actions environments + approval for prod.
+
+--- Step 6.4 — Cost control
+What:
+  - Use smallest judge model for CI; cap dataset size; schedule full eval nightly not per push.
+
+Why:
+  - PR eval cost explodes without limits.
+
+================================================================================
+PHASE 7 — ADVANCED RAG (OPTIONAL)
+================================================================================
+
+--- Step 7.1 — Hybrid retrieval (BM25 + vector)
+What:
+  - Index same chunks in rank_bm25 or Elasticsearch/OpenSearch; fuse scores (RRF or weighted).
+
+Why:
+  - Keyword-heavy queries (SKUs, error codes) often miss with dense-only search.
+
+Tool:
+  - rank-bm25 + existing FAISS; or single hybrid engine (Qdrant hybrid) if migrating.
+
+Code-level:
+  - app/retrieval/hybrid_store.py; orchestrator calls hybrid_search(message, k).
+
+--- Step 7.2 — Re-ranking
+What:
+  - Retrieve top 20; cross-encoder rerank to top 5; pass top 5 to LLM context.
+
+Why:
+  - Precision@5 for RAG often jumps more than embedding swap.
+
+Tool:
+  - sentence-transformers CrossEncoder or Cohere rerank API.
+
+Code-level:
+  - app/retrieval/rerank.py; config rag.rerank_top_n.
+
+--- Step 7.3 — Chunking strategy
+What:
+  - Replace/augment tiktoken fixed windows with markdown heading-aware chunking in
+    chunking.py; tune overlap per section type.
+
+Why:
+  - Fewer mid-sentence cuts → better faithfulness scores.
+
+================================================================================
+FINAL OUTPUT REFERENCE (for when implementation is complete)
+================================================================================
+
+1) Updated system architecture (conceptual)
+   Client (React) → FastAPI /chat
+     → (optional) Helicone → OpenAI
+     → MemoryStore (cache + history + feedback)
+     → Orchestrator: LangSmith-traced intent → RAG (FAISS [+BM25] [+rerank]) or ticket mock
+     → LangSmith traces + W&B eval runs + MLflow prompt artifacts for releases
+   CI: GitHub Actions runs lint/build/offline-smoke-eval; CD runs full eval then deploy.
+
+2) Folder structure additions (incremental)
+   eval/
+     datasets/
+     run_eval.py
+     metrics.py
+     regression.py
+     load_dataset.py
+   jobs/
+     sync_langsmith_to_wandb.py
+     promote_feedback_to_eval.py
+   prompts/   (optional split from prompts.py)
+   .github/workflows/ci.yml
+   reports/   (gitignored) eval outputs
+
+3) Key integration snippets (where to touch existing code)
+   - app/main.py / app/llm/client.py: Helicone base_url + headers; LangSmith env.
+   - app/llm/generation.py + intent_classifier.py: trace decorators / run trees.
+   - app/orchestrator/agent.py: pass run_id / trace context; log retrieval summaries.
+   - app/core/config.py: new settings (helicone_*, langsmith_*, wandb_*, mlflow_*).
+   - frontend: feedback UI → POST /feedback.
+
+4) Interview explanation (short)
+   “We ship a RAG + intent-routed support API. Every LLM call is traced in LangSmith with
+   retrieval context attached. Offline evals on a curated dataset score correctness,
+   faithfulness, and retrieval; CI runs a regression slice on each PR. Experiments log to W&B;
+   released prompt bundles are versioned in MLflow for rollback. Production traffic is mirrored
+   through Helicone for cost/latency SLOs, and user feedback promotes hard cases back into the
+   eval set.”
+
+================================================================================
+EXECUTION ORDER (RECOMMENDED)
+================================================================================
+  1) Phase 1.1–1.2 (dataset + tracing) — highest leverage for debugging.
+  2) Phase 1.3–1.5 (metrics + automation + regression).
+  3) Phase 4.1 (Helicone) — cheap production visibility.
+  4) Phase 5 (feedback) — uses existing product surface.
+  5) Phase 6 (CI) — wire eval runner to GitHub Actions.
+  6) Phase 2 (W&B) + Phase 3 (MLflow) — as team needs formal experiment registry.
+  7) Phase 7 when retrieval quality plateaus.
+
+================================================================================
+END OF LLMOPS_PLAN.TXT
+================================================================================

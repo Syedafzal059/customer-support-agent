@@ -41,3 +41,9 @@ rag:
   chunk_size_tokens: 400
   chunk_overlap_tokens: 50
   top_k: 3
+
+
+# Observability (LangSmith). API key: LANGSMITH_API_KEY or LANGCHAIN_API_KEY in .env.
+langsmith:
+  enable: true
+  project: "customer_support_dev"

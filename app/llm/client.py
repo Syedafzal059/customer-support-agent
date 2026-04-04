@@ -1,7 +1,7 @@
 """OpenAI client wrapper for chat completions with structured parsing."""
 
 from __future__ import annotations
-
+import os
 from typing import TypeVar
 
 from openai import OpenAI
@@ -12,11 +12,30 @@ from app.core.config import AppSettings
 T = TypeVar("T", bound=BaseModel)
 
 
+def _langsmith_api_key() -> str:
+    return (os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY") or "").strip()
+
+
 def get_openai_client(settings: AppSettings) -> OpenAI:
     kwargs: dict = {}
     if settings.openai_base_url.strip():
         kwargs["base_url"] = settings.openai_base_url.strip()
-    return OpenAI(**kwargs)
+    client = OpenAI(**kwargs)
+
+    if not settings.langsmith_enabled or not _langsmith_api_key():
+        return client
+
+    if settings.langsmith_project.strip():
+        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project.strip())
+        os.environ.setdefault("LANGCHAIN_PROJECT", settings.langsmith_project.strip())
+    os.environ.setdefault("LANGSMITH_TRACING", "true")
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    
+    from langsmith.wrappers import wrap_openai
+    
+    return wrap_openai(client)
+
+
 
 
 def complete_parsed(

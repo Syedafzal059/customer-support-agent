@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
+from langsmith import traceable
 from openai import OpenAIError
 
 from app.core.config import AppSettings
@@ -18,7 +19,7 @@ from app.llm.schemas import IntentClassification
 from app.memory import chat_memory
 from app.memory.redis_client import MemoryStore
 from app.orchestrator.intent_classifier import classify_intent
-from app.retrieval.faiss_store import get_knowledge_index
+from app.retrieval.faiss_store import FaissKnowledgeIndex, get_knowledge_index
 
 logger = get_logger(__name__)
 
@@ -92,6 +93,17 @@ def _answer_ticket_path(
     )
 
 
+@traceable(name="rag_retrieval", run_type="retriever")
+def retrieve_rag_chunks(
+    *,
+    query: str,
+    settings: AppSettings,
+    kb: FaissKnowledgeIndex,
+) -> list[str]:
+    """FAISS top-k retrieval; appears as a retriever span in LangSmith with chunk texts as output."""
+    return kb.search(query, settings)
+
+
 def _answer_question_path(
     message: str,
     history: list[dict[str, str]],
@@ -100,7 +112,7 @@ def _answer_question_path(
     kb = get_knowledge_index()
     if kb is None:
         return "[RAG] Knowledge index is not initialized."
-    hits = kb.search(message, settings)
+    hits = retrieve_rag_chunks(query=message, settings=settings, kb=kb)
     if not hits:
         return RAG_UNKNOWN_REPLY
     return generate_rag_answer(
