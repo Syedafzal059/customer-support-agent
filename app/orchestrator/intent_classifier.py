@@ -6,7 +6,7 @@ from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree, set_run_metadata
 
 from app.core.config import AppSettings
-from app.llm.client import complete_parsed, get_openai_client
+from app.llm.client import complete_parsed, get_openai_client, helicone_extra_headers
 from app.llm.prompts import build_intent_classifier_messages
 from app.llm.router import model_for_task
 from app.llm.schemas import IntentClassification
@@ -33,4 +33,5 @@ def classify_intent(
         model,
         messages,
         IntentClassification,
+        extra_headers=helicone_extra_headers(settings, step="intent_classification"),
     )

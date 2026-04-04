@@ -20,7 +20,7 @@
 | **RAG** | Chunk KB → embed → FAISS `IndexFlatIP`; top-k context → grounded completion |
 | **Tickets** | Mock `get_ticket(id)` → short narrative via LLM |
 | **Memory** | Per-user history + response cache (`MemoryStore`, default in-process) |
-| **Observability** | JSON **logs**; **`X-Request-ID`** on responses; optional **LangSmith** traces (step-by-step view of each chat) |
+| **Observability** | JSON **logs**; **`X-Request-ID`**; **LangSmith** traces; optional **Helicone** proxy for cost/latency dashboards ([screenshots](#live-integrations-screenshots)) |
 | **Eval & metrics** | **Offline tests:** `run_eval` → report under `reports/`; optional LLM **scores**; **`regression`** compares routing to **`regression_baseline.json`** |
 
 ---
@@ -73,7 +73,7 @@ flowchart LR
 | Embeddings / RAG | sentence-transformers, FAISS (CPU), tiktoken chunking |
 | UI | React 18, Vite 5, static `serve` on `:5173` |
 | Config | `configs/config.yaml` + `.env` overrides |
-| Tracing | LangSmith (`wrap_openai` + `@traceable` spans; `apply_langsmith_env_from_settings` so the configured **project** applies before the first trace) |
+| Tracing | LangSmith (`wrap_openai` + `@traceable` spans; startup **project** sync). Optional **Helicone** OpenAI proxy (`app/llm/client.py`). |
 
 ---
 
@@ -125,6 +125,8 @@ Open **http://127.0.0.1:5173**. Set `VITE_API_URL` if the API is not `http://127
 
 **LangSmith (optional):** `LANGSMITH_API_KEY` or `LANGCHAIN_API_KEY`; enable via `langsmith.enable` in YAML and/or `LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`. **`langsmith.project`** in YAML sets the LangSmith project unless **`LANGSMITH_PROJECT`** / **`LANGCHAIN_PROJECT`** in `.env` override (see `app/core/config.py`). Env vars are applied at **app startup** (`apply_langsmith_env_from_settings`) so traces do not fall back to the Default project. See `.env.example`.
 
+**Helicone (optional, prod analytics proxy):** set **`HELICONE_API_KEY`** in `.env`, enable with **`helicone.enable: true`** in YAML and/or **`HELICONE_ENABLED=true`**. The OpenAI client uses **`https://oai.helicone.ai/v1`** (override via **`HELICONE_OPENAI_PROXY_BASE_URL`**). You still need **`OPENAI_API_KEY`**; Helicone forwards to OpenAI. When Helicone is on, **`OPENAI_BASE_URL`** is ignored for chat calls unless you disable Helicone. Per-request tags: **`Helicone-Property-Step`** (intent, judges) and **`Helicone-Property-Branch`** (`question` / `ticket` for generation).
+
 Full resolution order is implemented in `app/core/config.py`.
 
 ---
@@ -168,6 +170,7 @@ Full resolution order is implemented in `app/core/config.py`.
 | `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`**, **`judges`**, **`judge_schemas`**, **`run_eval`**, **`regression`**, **`regression_baseline.json`** |
 | `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
+| `docs/screenshots/` | README figures: LangSmith trace + Helicone dashboard (proof of wiring) |
 | `data/knowledge_base/` | RAG sources (Markdown/text) |
 | `frontend/` | React UI |
 | `plan.txt` | Build phases |
@@ -194,6 +197,20 @@ Together they answer: *Is the app healthy? For this one request, what did it act
 | See cache hits, which path ran (KB vs ticket), errors | Server terminal: JSON log lines whose **`message`** is `orchestrator_*` or `chat_completed` |
 | Get scores for many fixed test questions | Run **`python -m app.eval.run_eval`** → read **`reports/eval_run_*.jsonl`** |
 | CI check: “did we break routing?” | After `run_eval`, run **`python -m app.eval.regression`** with the latest report vs **`app/eval/regression_baseline.json`** |
+
+---
+
+### Live integrations (screenshots)
+
+These are from a working dev setup: LangSmith project **`customer_support_dev`**, OpenAI **`gpt-4o-mini`** with Helicone proxy enabled for the dashboard shot.
+
+**LangSmith** — one **`chat_turn`** trace: **`intent_classification`** → **`rag_retrieval`** → **`generate_rag_answer`**, with nested **`ChatOpenAI`** spans and inputs/outputs (e.g. `request_id`, `intent`, reply text).
+
+![LangSmith trace waterfall for chat_turn](docs/screenshots/langsmith-chat-turn-trace.png)
+
+**Helicone** — dashboard summary: request volume, latency, tokens, cost, and provider (**OPENAI** / **`gpt-4o-mini`**) for traffic proxied through Helicone.
+
+![Helicone dashboard: cost and latency for proxied OpenAI calls](docs/screenshots/helicone-dashboard.png)
 
 ---
 
@@ -229,7 +246,9 @@ There are more events in code for edge cases; search `logger.info` in `app/` if 
 - Then **`generate_rag_answer`** or **`generate_ticket_narrative`** (“what did the model write?”).
 - Under those, **ChatOpenAI** rows are the actual API calls.
 
-The app sets your **project name** from config at startup so runs do not silently go to LangSmith’s “Default” project. Eval runs use a **`request_id`** starting with **`eval-`** so you can filter them in the UI.
+The app sets your **project name** from config at startup so runs do not silently go to LangSmith’s “Default” project. Eval runs use a **`request_id`** starting with **`eval-`** so you can filter them in the UI. An example trace is shown under [Live integrations (screenshots)](#live-integrations-screenshots).
+
+**Helicone** (when enabled) sits in front of OpenAI for the same chat calls: use it for **aggregate** cost and latency; use LangSmith for **per-request** debugging. Example dashboard: [screenshots](#live-integrations-screenshots).
 
 ---
 

@@ -6,7 +6,7 @@ from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree, set_run_metadata
 
 from app.core.config import AppSettings
-from app.llm.client import complete_text, get_openai_client
+from app.llm.client import complete_text, get_openai_client, helicone_extra_headers
 from app.llm.prompts import build_rag_qa_messages, build_ticket_summary_messages
 from app.llm.router import model_for_task
 
@@ -27,7 +27,13 @@ def generate_rag_answer(
             rag_model=model,
             chunk_count=len(context_chunks),
         )
-    return complete_text(client, model, messages)
+    return complete_text(
+        client,
+        model,
+        messages,
+        extra_headers=helicone_extra_headers(settings, branch="question"),
+    )
+
 
 @traceable(name="generate_ticket_narrative", run_type="chain")
 def generate_ticket_narrative(
@@ -41,4 +47,9 @@ def generate_ticket_narrative(
     model = model_for_task(settings, "ticket_summary")
     if get_current_run_tree() is not None:
         set_run_metadata(ticket_summary_model=model)
-    return complete_text(client, model, messages)
+    return complete_text(
+        client,
+        model,
+        messages,
+        extra_headers=helicone_extra_headers(settings, branch="ticket"),
+    )
