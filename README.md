@@ -19,7 +19,7 @@
 | **Tickets** | Mock `get_ticket(id)` → short narrative via LLM |
 | **Memory** | Per-user history + response cache (`MemoryStore`, default in-process) |
 | **Observability** | Structured logs; optional **LangSmith** (OpenAI wrapper + `rag_retrieval` span) |
-| **Eval** | Versioned JSONL cases + Pydantic `EvalCase` + loader under `app/eval/` |
+| **Eval** | JSONL datasets + `EvalCase`; **`python -m app.eval.run_eval`** runs all cases, scores **routing** (`question` / `ticket`), writes **`reports/eval_run_*.jsonl`** (gitignored) |
 
 ---
 
@@ -160,7 +160,8 @@ Full resolution order is implemented in `app/core/config.py`.
 | `app/retrieval/` | Chunking, embeddings, FAISS |
 | `app/memory/` | Chat history + cache |
 | `app/integrations/jira_mock.py` | Mock ticket payload |
-| `app/eval/` | `EvalCase` schema, JSONL datasets, `load_dataset` |
+| `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`** (`score_routing`), **`run_eval`** CLI |
+| `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
 | `data/knowledge_base/` | RAG sources (Markdown/text) |
 | `frontend/` | React UI |
@@ -173,7 +174,13 @@ Full resolution order is implemented in `app/core/config.py`.
 
 - **Logs:** `chat_completed`, `orchestrator_cache_hit` / `miss`, `orchestrator_intent`, `orchestrator_route`, KB build events. Avoid `log_chat_message_body` in production (PII).
 - **LangSmith:** OpenAI calls traced via wrapped client; FAISS retrieval appears as run **`rag_retrieval`** (`run_type: retriever`).
-- **Offline eval:** Load cases with `app.eval.load_dataset.load_eval_cases` from `app/eval/datasets/*.jsonl`.
+- **Offline eval (routing):** From the repo root with venv activated and **`OPENAI_API_KEY`** in `.env` (loaded automatically by the runner):
+
+  ```bash
+  python -m app.eval.run_eval
+  ```
+
+  Rebuilds the KB index, runs each row in `app/eval/datasets/support_eval_v1.jsonl` through **`run_chat_turn`** (fresh `MemoryStore`, `user_id` = `eval-{case_id}`), prints per-case **`route_ok`**, and writes **`reports/eval_run_<UTC_stamp>.jsonl`** (one JSON object per line; includes `response_preview` and `error` rows on failure). Exit code **0** only if every case passes routing. See **`llmops_plan.txt`** for judge metrics, baselines, and CI next steps.
 
 ---
 
@@ -188,7 +195,7 @@ Full resolution order is implemented in `app/core/config.py`.
 
 - Default **in-memory** store (no durable Redis in the hot path).
 - **Mock** tickets only.
-- Automated tests are minimal; manual `/health` + UI + LangSmith spot-checks are typical.
+- Automated tests are minimal; use **`run_eval`** for routing regression locally; LangSmith for trace spot-checks.
 
 ---
 
