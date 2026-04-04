@@ -15,13 +15,14 @@
 
 | Layer | What it does |
 |--------|----------------|
-| **API** | `POST /chat` — cache → intent → RAG or ticket path; `GET /health` |
+| **API** | `POST /chat` — cache → intent → RAG or ticket path; `POST /feedback`; `GET /health` |
 | **Routing** | OpenAI `parse` → `question` \| `ticket` (no hand-written keyword routers) |
 | **RAG** | Chunk KB → embed → FAISS `IndexFlatIP`; top-k context → grounded completion |
 | **Tickets** | Mock `get_ticket(id)` → short narrative via LLM |
 | **Memory** | Per-user history + response cache (`MemoryStore`, default in-process) |
 | **Observability** | JSON **logs**; **`X-Request-ID`**; **LangSmith** traces; optional **Helicone** proxy for cost/latency dashboards ([screenshots](#live-integrations-screenshots)) |
 | **Eval & metrics** | **Offline tests:** `run_eval` → report under `reports/`; optional LLM **scores**; **`regression`** compares routing to **`regression_baseline.json`** |
+| **Feedback** | React UI thumbs (and API **`/feedback`**); append-only **`data/feedback/*.jsonl`** on the server; **`promote_feedback`** drafts eval rows from the review queue |
 
 ---
 
@@ -165,7 +166,18 @@ Full resolution order is implemented in `app/core/config.py`.
 }
 ```
 
-Provide at least one of **`rating`** (1–5), **`thumbs`**, or a non-empty **`comment`**. Thumbs down or rating ≤ 2 also appends the row to **`data/feedback/review_queue.jsonl`** (gitignored) for human review. Draft eval rows: **`python -m app.eval.promote_feedback`**.
+Provide at least one of **`rating`** (1–5), **`thumbs`**, or a non-empty **`comment`**. Thumbs down or rating ≤ 2 also append to the **review queue** (see below).
+
+**Where feedback is stored (no admin UI yet):**
+
+| Location | What |
+|----------|------|
+| **`data/feedback/events.jsonl`** | Every feedback event (one JSON object per line). Created when the API runs from the repo root; **not** committed (`.gitignore`). |
+| **`data/feedback/review_queue.jsonl`** | Subset flagged for review: **thumbs down** or **rating ≤ 2** (plus the same rows in `events.jsonl`). |
+| **Server logs** | Structured event **`feedback_received`** (`request_id`, `user_id`, `thumbs`, `rating`, `queued_for_review`, …). |
+| **In-memory** | `MemoryStore` lists `feedback:events` / `feedback:review_queue` (same content as the files during the process lifetime). |
+
+Draft eval JSONL from the review file: **`python -m app.eval.promote_feedback`** (optional **`--input`** / **`--out`**).
 
 ---
 
@@ -185,7 +197,7 @@ Provide at least one of **`rating`** (1–5), **`thumbs`**, or a non-empty **`co
 | `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`**, **`judges`**, **`judge_schemas`**, **`run_eval`**, **`regression`**, **`promote_feedback`**, **`regression_baseline.json`** |
 | `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
-| `docs/screenshots/` | README figures: LangSmith trace + Helicone dashboard (proof of wiring) |
+| `docs/screenshots/` | README figures: **UI**, LangSmith trace, Helicone dashboard |
 | `.github/workflows/ci.yml` | **GitHub Actions:** Ruff, frontend build, `run_eval` + `regression` (**`OPENAI_API_KEY`** secret; CI sets **`HELICONE_ENABLED=false`** so eval hits OpenAI directly) |
 | `requirements-dev.txt` | **`ruff`** for local lint/format (same as CI) |
 | `data/feedback/` | Runtime **`events.jsonl`** / **`review_queue.jsonl`** (gitignored); **`.gitkeep`** only in git |
@@ -221,12 +233,17 @@ Together they answer: *Is the app healthy? For this one request, what did it act
 | See cache hits, which path ran (KB vs ticket), errors | Server terminal: JSON log lines whose **`message`** is `orchestrator_*` or `chat_completed` |
 | Get scores for many fixed test questions | Run **`python -m app.eval.run_eval`** → read **`reports/eval_run_*.jsonl`** |
 | CI check: “did we break routing?” | On push/PR to **`main`**, Actions runs **`run_eval`** (judges off) then **`regression`**; add repo secret **`OPENAI_API_KEY`**. Fork PRs skip the eval job (no secrets). Locally: run **`python -m app.eval.regression`** on the latest **`reports/eval_run_*.jsonl`** vs **`app/eval/regression_baseline.json`**. |
+| Read user feedback captured in production | Open **`data/feedback/events.jsonl`** (all) or **`review_queue.jsonl`** (negative / low rating only) on the host where **`uvicorn`** runs |
 
 ---
 
 ### Live integrations (screenshots)
 
 These are from a working dev setup: LangSmith project **`customer_support_dev`**, OpenAI **`gpt-4o-mini`** with Helicone proxy enabled for the dashboard shot.
+
+**React UI** — chat with optional **Helpful?** thumbs; feedback is persisted under **`data/feedback/`** on the API server.
+
+![AI Support web UI with chat and feedback thumbs](docs/screenshots/ui.png)
 
 **LangSmith** — one **`chat_turn`** trace: **`intent_classification`** → **`rag_retrieval`** → **`generate_rag_answer`**, with nested **`ChatOpenAI`** spans and inputs/outputs (e.g. `request_id`, `intent`, reply text).
 
