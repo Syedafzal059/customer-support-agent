@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree, set_run_metadata
 from openai import OpenAIError
 
 from app.core.config import AppSettings
@@ -27,6 +29,18 @@ logger = get_logger(__name__)
 _RESPONSE_CACHE_VERSION = "v3"
 
 Source = Literal["question", "ticket"]
+
+
+def _user_id_trace_hash(user_id: str) -> str:
+    """Stable pseudonymous id for LangSmith metadata (not reversible to raw user_id)."""
+    return hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _merge_chat_turn_trace_metadata(**fields: Any) -> None:
+    """Attach metadata to the current `chat_turn` span when a LangSmith run is active."""
+    if get_current_run_tree() is None:
+        return
+    set_run_metadata(**{k: v for k, v in fields.items() if v is not None})
 
 
 class MissingOpenAIKeyError(Exception):
@@ -101,7 +115,13 @@ def retrieve_rag_chunks(
     kb: FaissKnowledgeIndex,
 ) -> list[str]:
     """FAISS top-k retrieval; appears as a retriever span in LangSmith with chunk texts as output."""
-    return kb.search(query, settings)
+    chunks = kb.search(query, settings)
+    if get_current_run_tree() is not None:
+        set_run_metadata(
+            rag_top_k=settings.rag_top_k,
+            retrieved_chunk_count=len(chunks),
+        )
+    return chunks
 
 
 def _answer_question_path(
@@ -123,18 +143,30 @@ def _answer_question_path(
     )
 
 
+@traceable(name="chat_turn", run_type="chain")
 def run_chat_turn(
     *,
     user_id: str,
     message: str,
     store: MemoryStore,
     settings: AppSettings,
+    request_id: str | None = None,
 ) -> ChatTurnOutcome:
+    _merge_chat_turn_trace_metadata(
+        request_id=request_id,
+        user_id_hash=_user_id_trace_hash(user_id),
+        message_length=len(message),
+    )
+
     prior = chat_memory.get_chat_history(user_id, store)
     cache_key = _cache_lookup_key(user_id, message)
     cached_raw = chat_memory.get_cache(cache_key, store)
     if cached_raw is not None:
         reply, source = _deserialize_cache_entry(cached_raw)
+        _merge_chat_turn_trace_metadata(
+            cache_hit=True,
+            source=source,
+        )
         logger.info(
             "orchestrator_cache_hit",
             extra={
@@ -156,6 +188,8 @@ def run_chat_turn(
         "orchestrator_cache_miss",
         extra={"structured": {"user_id": user_id}},
     )
+
+    _merge_chat_turn_trace_metadata(cache_hit=False)
 
     if not os.getenv("OPENAI_API_KEY", "").strip():
         raise MissingOpenAIKeyError("OPENAI_API_KEY is not configured")
@@ -194,6 +228,11 @@ def run_chat_turn(
                     "kb_chunk_count": kb_index.chunk_count if kb_index else 0,
                 }
             },
+        )
+        _merge_chat_turn_trace_metadata(
+            source=branch,
+            intent=branch,
+            kb_index_chunk_count=kb_index.chunk_count if kb_index else 0,
         )
     except (OpenAIError, RuntimeError):
         logger.exception(

@@ -11,6 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from app.core.config import get_settings
+from app.llm.client import apply_langsmith_env_from_settings
 from app.eval.judges import (
     score_correctness_judge,
     score_faithfulness_judge,
@@ -39,6 +40,7 @@ def main() -> int:
         return 1
 
     settings = get_settings()
+    apply_langsmith_env_from_settings(settings)
     rebuild_knowledge_index(settings)
     cases = load_eval_cases(default_dataset_path())
     store = MemoryStore()
@@ -59,6 +61,7 @@ def main() -> int:
                     message=case.message,
                     store=store,
                     settings=settings,
+                    request_id=f"eval-{stamp}-{case.id}",
                 )
             except MissingOpenAIKeyError as e:
                 print(f"{case.id} ERROR: {e}", file=sys.stderr)
