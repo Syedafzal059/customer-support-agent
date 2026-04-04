@@ -1,8 +1,7 @@
 """API route handlers."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from openai import OpenAIError
-
 from app.api.schemas import ChatRequest, ChatResponse, HealthResponse
 from app.core.config import AppSettings, get_settings
 from app.core.logger import get_logger
@@ -50,17 +49,20 @@ def _log_chat_completed(
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(
+    request: Request,
     body: ChatRequest,
     settings: AppSettings = Depends(get_settings),
     store: MemoryStore = Depends(get_memory_store_dep),
 ) -> ChatResponse:
     prior_count = len(chat_memory.get_chat_history(body.user_id, store))
+    request_id = getattr(request.state, "request_id", None)
     try:
         outcome = run_chat_turn(
             user_id=body.user_id,
             message=body.message,
             store=store,
             settings=settings,
+            request_id=request_id,
         )
     except MissingOpenAIKeyError as exc:
         raise HTTPException(

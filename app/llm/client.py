@@ -16,6 +16,22 @@ def _langsmith_api_key() -> str:
     return (os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY") or "").strip()
 
 
+def apply_langsmith_env_from_settings(settings: AppSettings) -> None:
+    """Set tracing env before any @traceable runs so LangSmith uses the configured project.
+
+    Without this, the first spans (e.g. chat_turn) start before get_openai_client runs and
+    often land in LangSmith's default project.
+    """
+    if not settings.langsmith_enabled or not _langsmith_api_key():
+        return
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    proj = settings.langsmith_project.strip()
+    if proj:
+        os.environ["LANGSMITH_PROJECT"] = proj
+        os.environ["LANGCHAIN_PROJECT"] = proj
+
+
 def get_openai_client(settings: AppSettings) -> OpenAI:
     kwargs: dict = {}
     if settings.openai_base_url.strip():
@@ -25,11 +41,7 @@ def get_openai_client(settings: AppSettings) -> OpenAI:
     if not settings.langsmith_enabled or not _langsmith_api_key():
         return client
 
-    if settings.langsmith_project.strip():
-        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project.strip())
-        os.environ.setdefault("LANGCHAIN_PROJECT", settings.langsmith_project.strip())
-    os.environ.setdefault("LANGSMITH_TRACING", "true")
-    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    apply_langsmith_env_from_settings(settings)
     
     from langsmith.wrappers import wrap_openai
     

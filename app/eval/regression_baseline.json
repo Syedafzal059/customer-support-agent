@@ -1,0 +1,15 @@
+{
+    "dataset": "support_eval_v1",
+    "description": "Baseline for Phase 1.5 regression; bump when intentionally changing prompts/models.",
+    "cases": {
+      "kb-password-001": { "route_ok": true },
+      "kb-export-001": { "route_ok": true },
+      "kb-billing-001": { "route_ok": true },
+      "meta-who-001": { "route_ok": true },
+      "off-kb-001": { "route_ok": true },
+      "ticket-key-001": { "route_ok": true },
+      "ticket-missing-key-001": { "route_ok": true }
+    }
+  }
+
+

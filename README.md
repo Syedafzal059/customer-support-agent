@@ -5,6 +5,8 @@
 
 **Production-style customer-support chat API** with a React UI: **RAG** over a local knowledge base (FAISS + sentence-transformers), **LLM intent routing** (OpenAI structured outputs), and **ticket-style answers** from a mock Jira-shaped backend. Designed as a reference implementation for grounded Q&A, observability hooks, and offline eval scaffolding.
 
+**Observability & quality:** structured JSON logs, **LangSmith** trace tree (`chat_turn` → intent → retrieval → generation), **`X-Request-ID`** for request correlation, and an **offline eval** harness with optional LLM judges plus a **routing regression** CLI. Details: [Observability & evaluation](#observability--evaluation).
+
 **Upstream:** [github.com/Syedafzal059/customer-support-agent](https://github.com/Syedafzal059/customer-support-agent)
 
 ---
@@ -18,8 +20,8 @@
 | **RAG** | Chunk KB → embed → FAISS `IndexFlatIP`; top-k context → grounded completion |
 | **Tickets** | Mock `get_ticket(id)` → short narrative via LLM |
 | **Memory** | Per-user history + response cache (`MemoryStore`, default in-process) |
-| **Observability** | Structured logs; optional **LangSmith** (OpenAI wrapper + `rag_retrieval` span) |
-| **Eval** | JSONL + `EvalCase`; **`python -m app.eval.run_eval`** rebuilds KB, runs **`run_chat_turn`** per row, **exit code = routing only**; optional **LLM judges** (correctness vs reference/rubric, faithfulness vs retrieved chunks) + rule-based **`expected_kb_sources`** → **`reports/eval_run_*.jsonl`** (gitignored) |
+| **Observability** | JSON logs; **`X-Request-ID`**; optional **LangSmith** (startup project sync, `wrap_openai`, spans: `chat_turn`, `intent_classification`, `rag_retrieval`, `generate_rag_answer`, `generate_ticket_narrative` + run metadata) |
+| **Eval & metrics** | JSONL `EvalCase`; **`python -m app.eval.run_eval`** → **`reports/eval_run_*.jsonl`**; **routing** + optional **correctness / faithfulness / retrieval** judges; **`python -m app.eval.regression`** vs **`app/eval/regression_baseline.json`** (routing gate) |
 
 ---
 
@@ -71,7 +73,7 @@ flowchart LR
 | Embeddings / RAG | sentence-transformers, FAISS (CPU), tiktoken chunking |
 | UI | React 18, Vite 5, static `serve` on `:5173` |
 | Config | `configs/config.yaml` + `.env` overrides |
-| Tracing | LangSmith (`langsmith`, `wrap_openai`, `@traceable` on retrieval) |
+| Tracing | LangSmith (`wrap_openai` + `@traceable` spans; `apply_langsmith_env_from_settings` so the configured **project** applies before the first trace) |
 
 ---
 
@@ -121,7 +123,7 @@ Open **http://127.0.0.1:5173**. Set `VITE_API_URL` if the API is not `http://127
 
 **Offline eval judges:** `EVAL_RUN_JUDGES` (default on; `false` = routing-only, faster), `OPENAI_EVAL_JUDGE_MODEL` (optional; defaults to RAG QA model from config). See `.env.example`.
 
-**LangSmith (optional):** `LANGSMITH_API_KEY` or `LANGCHAIN_API_KEY`; enable via `langsmith.enable` in YAML and/or `LANGSMITH_TRACING=true`. See `.env.example`.
+**LangSmith (optional):** `LANGSMITH_API_KEY` or `LANGCHAIN_API_KEY`; enable via `langsmith.enable` in YAML and/or `LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`. **`langsmith.project`** in YAML sets the LangSmith project unless **`LANGSMITH_PROJECT`** / **`LANGCHAIN_PROJECT`** in `.env` override (see `app/core/config.py`). Env vars are applied at **app startup** (`apply_langsmith_env_from_settings`) so traces do not fall back to the Default project. See `.env.example`.
 
 Full resolution order is implemented in `app/core/config.py`.
 
@@ -146,6 +148,7 @@ Full resolution order is implemented in `app/core/config.py`.
 
 - `intent` is `null` on cache hits.
 - `503` if OpenAI is required but missing/failing; `501` if `redis.backend` ≠ `memory` (only in-memory is wired in routes).
+- Responses include **`X-Request-ID`** (echoed from the request header or generated); use it with LangSmith **`chat_turn`** metadata and logs.
 
 ---
 
@@ -153,16 +156,16 @@ Full resolution order is implemented in `app/core/config.py`.
 
 | Path | Role |
 |------|------|
-| `app/main.py` | App factory, CORS, lifespan (KB index) |
+| `app/main.py` | App factory, CORS, **`RequestIdMiddleware`**, lifespan (KB index + LangSmith env) |
 | `app/api/` | Routes, HTTP schemas |
 | `app/core/` | Settings (YAML + env), logging |
-| `app/orchestrator/agent.py` | Cache → intent → RAG/ticket; **`retrieve_rag_chunks`** (LangSmith) |
+| `app/orchestrator/agent.py` | Cache → intent → RAG/ticket; **`chat_turn`** + **`retrieve_rag_chunks`** LangSmith spans; trace metadata (`request_id`, `user_id_hash`, `cache_hit`, …) |
 | `app/orchestrator/intent_classifier.py` | Structured intent |
 | `app/llm/` | OpenAI client (LangSmith wrap), prompts, generation |
 | `app/retrieval/` | Chunking, embeddings, FAISS |
 | `app/memory/` | Chat history + cache |
 | `app/integrations/jira_mock.py` | Mock ticket payload |
-| `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`**, **`judges`** (LLM correctness/faithfulness), **`judge_schemas`**, **`run_eval`** CLI |
+| `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`**, **`judges`**, **`judge_schemas`**, **`run_eval`**, **`regression`**, **`regression_baseline.json`** |
 | `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
 | `data/knowledge_base/` | RAG sources (Markdown/text) |
@@ -175,6 +178,16 @@ Full resolution order is implemented in `app/core/config.py`.
 ## Observability & evaluation
 
 The service is instrumented so you can operate it like a production LLM stack: **machine-readable logs** for throughput and routing, **LLM-native traces** for prompt chains and retrieval, and an **offline harness** for regression on routing and (optionally) answer quality. Together they answer: *Did we route correctly? What did retrieval return? What did the model say—and was it grounded?*
+
+> **At a glance — where to look**
+>
+> | Need | Use |
+> |------|-----|
+> | One request end-to-end (latency, tokens, prompts) | **LangSmith** project from config — run tree **`chat_turn`** |
+> | Correlate HTTP ↔ trace ↔ logs | Response header **`X-Request-ID`**; same id in LangSmith metadata on **`chat_turn`** |
+> | Cache vs LLM path, branch, intent text | **`orchestrator_*`** and **`chat_completed`** log events |
+> | Offline quality scores | **`reports/eval_run_*.jsonl`** after **`run_eval`** |
+> | CI: “did routing break?” | **`python -m app.eval.regression`** vs **`regression_baseline.json`** |
 
 ### Structured logging (JSON lines)
 
@@ -199,15 +212,25 @@ All `app.*` loggers use `JsonLogFormatter` (`app/core/logger.py`): **one UTF-8 J
 | `orchestrator_llm_failed` | OpenAI/runtime error in orchestrator | `user_id` (+ exception) |
 | `chat_completed` | Successful HTTP response | see PII policy above |
 
-**How to debug:** Cache issues → `orchestrator_cache_*`. Wrong branch or ticket key → `orchestrator_intent` + `orchestrator_route`. Empty or wrong RAG answers → `knowledge_index_*` and LangSmith **`rag_retrieval`**. 5xx from OpenAI → `orchestrator_llm_failed` and provider traces.
+**How to debug:** Cache issues → `orchestrator_cache_*`. Wrong branch or ticket key → `orchestrator_intent` + `orchestrator_route`. Empty or wrong RAG answers → `knowledge_index_*` and LangSmith **`chat_turn`** → **`rag_retrieval`** / **`generate_rag_answer`**. 5xx from OpenAI → `orchestrator_llm_failed` and LangSmith child **ChatOpenAI** runs. Correlate with response header **`X-Request-ID`**.
 
 ### Distributed tracing (LangSmith)
 
-When tracing is enabled (`langsmith.enable` in YAML and/or `LANGSMITH_TRACING=true`, plus `LANGSMITH_API_KEY` / `LANGCHAIN_API_KEY`), `get_openai_client` returns **`wrap_openai(OpenAI)`** so **every chat completion** (intent, RAG answer, ticket narrative, eval judges) becomes a **nested run** in LangSmith under the configured **project**.
+When tracing is enabled (`langsmith.enable` in YAML and/or `LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`, plus `LANGSMITH_API_KEY` / `LANGCHAIN_API_KEY`):
 
-Retrieval is explicitly marked for evals and retrieval debugging: **`retrieve_rag_chunks`** is decorated with **`@traceable(name="rag_retrieval", run_type="retriever")`**, so FAISS top‑k appears as a **retriever**-typed span with chunk text in outputs—useful for grounding audits and comparing offline eval retrieval to live traces.
+1. **`apply_langsmith_env_from_settings`** runs at **app creation** and **lifespan** (and before eval runs) so `LANGSMITH_PROJECT` / `LANGCHAIN_PROJECT` match **`AppSettings`** before any span is created—avoids traces landing in LangSmith’s **Default** project.
+2. **`get_openai_client`** returns **`wrap_openai(OpenAI)`** so each **chat completion** appears as a nested **ChatOpenAI** run (intent parse, RAG answer, ticket narrative, eval judges when tracing is on).
 
-There is no HTTP `trace_id` propagated from FastAPI today; **correlate** live traffic with **`user_id`** in logs and time window, or rely on LangSmith’s run tree for a single request once nesting is attached to your deployment pattern.
+**Named spans (business-level tree):** nested under each **`chat_turn`** (`chain`):
+
+| Span | `run_type` | Role |
+|------|------------|------|
+| **`intent_classification`** | chain | Structured intent (`parse`); metadata: `intent_model`, `history_turns` |
+| **`rag_retrieval`** | retriever | FAISS top‑k; metadata: `rag_top_k`, `retrieved_chunk_count`; outputs include chunk text |
+| **`generate_rag_answer`** | chain | Grounded reply; metadata: `rag_model`, `chunk_count` |
+| **`generate_ticket_narrative`** | chain | Ticket summary; metadata: `ticket_summary_model` |
+
+**Root run metadata (`chat_turn`):** includes **`request_id`** (from **`X-Request-ID`** or generated), **`user_id_hash`** (SHA-256 prefix, not raw `user_id`), **`message_length`**, **`cache_hit`**, **`source`** / **`intent`**, **`kb_index_chunk_count`** when applicable. Eval runs pass **`request_id`** like `eval-<stamp>-<case_id>` for filtering in LangSmith.
 
 ### Offline evaluation harness
 
@@ -226,6 +249,19 @@ python -m app.eval.run_eval
 **Exit code:** `0` only if **routing branch** matches `route_expected` for every case (CI-friendly gate). Extracted ticket **key** is not part of this gate yet—see **Evaluation metrics** below. Judge scores are **signals**, not pass/fail unless you add thresholds.
 
 **Cost / speed:** `EVAL_RUN_JUDGES=false` skips judge API calls; `OPENAI_EVAL_JUDGE_MODEL` overrides the judge model (defaults to RAG QA model from config).
+
+### Routing regression (baseline diff)
+
+Compare a finished JSONL report to a committed baseline ( **`route_ok` per `case_id`** only):
+
+```bash
+python -m app.eval.regression --baseline app/eval/regression_baseline.json --report reports/eval_run_YYYYMMDD_HHMMSS.jsonl
+```
+
+- Exit **`0`** if every baseline case is present and **`route_ok`** matches.
+- Exit **`1`** and stderr lines (`MISSING` / `REGRESSION`) on mismatch—suitable for CI after `run_eval`.
+
+Judge score drift is **not** enforced here; extend the baseline format + script if you want mean correctness/faithfulness gates.
 
 ### Evaluation metrics (what we measure and why)
 
