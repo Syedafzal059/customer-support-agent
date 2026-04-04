@@ -53,6 +53,10 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user_id: userId, message: text }),
       });
+      const reqId =
+        res.headers.get("X-Request-ID")?.trim() ||
+        res.headers.get("x-request-id")?.trim() ||
+        null;
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const detail =
@@ -63,7 +67,11 @@ export default function App() {
               : res.statusText;
         throw new Error(detail || `Request failed (${res.status})`);
       }
-      setMessages((prev) => [...prev, { role: "assistant", text: data.response ?? "" }]);
+      const rid = (data.request_id && String(data.request_id).trim()) || reqId;
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: data.response ?? "", requestId: rid || undefined, feedbackSent: false },
+      ]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Network error";
       setError(msg);
@@ -79,6 +87,42 @@ export default function App() {
     }
   };
 
+  const sendFeedback = useCallback(
+    async (messageIndex, thumbs) => {
+      const m = messages[messageIndex];
+      if (!m || m.role !== "assistant" || !m.requestId || m.feedbackSent) return;
+      setError(null);
+      try {
+        const res = await fetch(`${baseUrl}/feedback`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            request_id: m.requestId,
+            user_id: userId,
+            thumbs,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail =
+            typeof data.detail === "string"
+              ? data.detail
+              : Array.isArray(data.detail)
+                ? data.detail.map((d) => d.msg || d).join(" ")
+                : res.statusText;
+          throw new Error(detail || `Feedback failed (${res.status})`);
+        }
+        setMessages((prev) =>
+          prev.map((msg, i) => (i === messageIndex ? { ...msg, feedbackSent: true } : msg)),
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Feedback failed";
+        setError(msg);
+      }
+    },
+    [baseUrl, messages, userId],
+  );
+
   return (
     <div className="app">
       <header className="app-header">
@@ -90,8 +134,32 @@ export default function App() {
           <div className="empty-state">Send a message to get started.</div>
         ) : (
           messages.map((m, i) => (
-            <div key={i} className={`bubble ${m.role}`}>
-              {m.text}
+            <div key={i} className={`message-block ${m.role}`}>
+              <div className={`bubble ${m.role}`}>{m.text}</div>
+              {m.role === "assistant" && m.requestId && (
+                <div className="feedback-row" aria-label="Rate this reply">
+                  <span className="feedback-label">Helpful?</span>
+                  <button
+                    type="button"
+                    className="thumb"
+                    disabled={!!m.feedbackSent}
+                    onClick={() => sendFeedback(i, "up")}
+                    aria-label="Thumbs up"
+                  >
+                    👍
+                  </button>
+                  <button
+                    type="button"
+                    className="thumb"
+                    disabled={!!m.feedbackSent}
+                    onClick={() => sendFeedback(i, "down")}
+                    aria-label="Thumbs down"
+                  >
+                    👎
+                  </button>
+                  {m.feedbackSent && <span className="feedback-thanks">Thanks for the feedback.</span>}
+                </div>
+              )}
             </div>
           ))
         )}

@@ -144,13 +144,28 @@ Full resolution order is implemented in `app/core/config.py`.
   "response": "…",
   "source": "question | ticket",
   "cached": true,
-  "intent": "question | ticket | null"
+  "intent": "question | ticket | null",
+  "request_id": "hex-or-null"
 }
 ```
 
 - `intent` is `null` on cache hits.
 - `503` if OpenAI is required but missing/failing; `501` if `redis.backend` ≠ `memory` (only in-memory is wired in routes).
-- Responses include **`X-Request-ID`** (echoed from the request header or generated); use it with LangSmith **`chat_turn`** metadata and logs.
+- Responses include **`X-Request-ID`** (echoed from the request header or generated); same value may appear as **`request_id`** in the JSON. CORS exposes this header for the React UI. Use with LangSmith **`chat_turn`** metadata and **`POST /feedback`**.
+
+### `POST /feedback`
+
+```json
+{
+  "request_id": "from X-Request-ID or chat response",
+  "user_id": "same as /chat",
+  "rating": null,
+  "thumbs": "up | down | null",
+  "comment": null
+}
+```
+
+Provide at least one of **`rating`** (1–5), **`thumbs`**, or a non-empty **`comment`**. Thumbs down or rating ≤ 2 also appends the row to **`data/feedback/review_queue.jsonl`** (gitignored) for human review. Draft eval rows: **`python -m app.eval.promote_feedback`**.
 
 ---
 
@@ -165,14 +180,15 @@ Full resolution order is implemented in `app/core/config.py`.
 | `app/orchestrator/intent_classifier.py` | Structured intent |
 | `app/llm/` | OpenAI client (LangSmith wrap), prompts, generation |
 | `app/retrieval/` | Chunking, embeddings, FAISS |
-| `app/memory/` | Chat history + cache |
+| `app/memory/` | Chat history + cache; **`feedback_store`** (feedback JSONL + turn snapshots) |
 | `app/integrations/jira_mock.py` | Mock ticket payload |
-| `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`**, **`judges`**, **`judge_schemas`**, **`run_eval`**, **`regression`**, **`regression_baseline.json`** |
+| `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`**, **`judges`**, **`judge_schemas`**, **`run_eval`**, **`regression`**, **`promote_feedback`**, **`regression_baseline.json`** |
 | `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
 | `docs/screenshots/` | README figures: LangSmith trace + Helicone dashboard (proof of wiring) |
 | `.github/workflows/ci.yml` | **GitHub Actions:** Ruff, frontend build, `run_eval` + `regression` (**`OPENAI_API_KEY`** secret; CI sets **`HELICONE_ENABLED=false`** so eval hits OpenAI directly) |
 | `requirements-dev.txt` | **`ruff`** for local lint/format (same as CI) |
+| `data/feedback/` | Runtime **`events.jsonl`** / **`review_queue.jsonl`** (gitignored); **`.gitkeep`** only in git |
 | `data/knowledge_base/` | RAG sources (Markdown/text) |
 | `frontend/` | React UI |
 | `plan.txt` | Build phases |

@@ -1,12 +1,22 @@
 """API route handlers."""
 
+from datetime import datetime, timezone
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from openai import OpenAIError
 
-from app.api.schemas import ChatRequest, ChatResponse, HealthResponse
+from app.api.schemas import (
+    ChatRequest,
+    ChatResponse,
+    FeedbackRequest,
+    FeedbackResponse,
+    HealthResponse,
+)
 from app.core.config import AppSettings, get_settings
 from app.core.logger import get_logger
 from app.memory import chat_memory
+from app.memory.feedback_store import append_feedback, get_turn_snapshot, store_turn_snapshot
 from app.memory.redis_client import MemoryStore, get_memory_store
 from app.orchestrator.agent import ChatTurnOutcome, MissingOpenAIKeyError, run_chat_turn
 
@@ -86,9 +96,64 @@ def chat(
     chat_memory.append_message(body.user_id, "user", body.message, store)
     chat_memory.append_message(body.user_id, "assistant", outcome.response, store)
 
+    if request_id:
+        store_turn_snapshot(
+            store,
+            request_id=request_id,
+            user_id=body.user_id,
+            user_message=body.message,
+            assistant_response=outcome.response,
+            source=outcome.source,
+            intent=outcome.intent,
+        )
+
     return ChatResponse(
         response=outcome.response,
         source=outcome.source,
         cached=outcome.from_cache,
         intent=outcome.intent,
+        request_id=request_id,
     )
+
+
+@router.post("/feedback", response_model=FeedbackResponse)
+def submit_feedback(
+    body: FeedbackRequest,
+    store: MemoryStore = Depends(get_memory_store_dep),
+) -> FeedbackResponse:
+    snapshot = get_turn_snapshot(store, body.request_id)
+    if snapshot is not None and snapshot.get("user_id") != body.user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="request_id does not match this user_id.",
+        )
+
+    payload: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "request_id": body.request_id,
+        "user_id": body.user_id,
+        "rating": body.rating,
+        "thumbs": body.thumbs,
+        "comment": body.comment,
+    }
+    if snapshot:
+        payload["user_message"] = snapshot.get("user_message")
+        payload["assistant_preview"] = snapshot.get("assistant_preview")
+        payload["source"] = snapshot.get("source")
+        payload["intent"] = snapshot.get("intent")
+
+    queued = append_feedback(store, payload)
+    logger.info(
+        "feedback_received",
+        extra={
+            "structured": {
+                "request_id": body.request_id,
+                "user_id": body.user_id,
+                "rating": body.rating,
+                "thumbs": body.thumbs,
+                "queued_for_review": queued,
+                "has_turn_context": snapshot is not None,
+            }
+        },
+    )
+    return FeedbackResponse(queued_for_review=queued)
