@@ -15,7 +15,7 @@ htmlcov/
 *.log
 .DS_Store
 Thumbs.db
-
+reports/
 # Phase 11 — Vite + React
 frontend/node_modules/
 frontend/dist/

@@ -46,6 +46,11 @@ class EvalCase(BaseModel):
         description="Prior turns for multi-turn routing tests",
     )
 
+    expected_kb_sources: list[str] | None = Field(
+        default=None,
+        description="Substrings that must appear in retrieved chunks, e.g. sample_support.md",
+    )
+
     @field_validator("id", "message", mode="before")
     @classmethod
     def strip_strings(cls, value: object) -> object:
@@ -89,3 +94,12 @@ class EvalCase(BaseModel):
                 raise ValueError("history entries need non-empty role and message")
             cleaned.append({"role": role, "message": msg})
         return cleaned
+
+    @field_validator("expected_kb_sources", mode="before")
+    @classmethod
+    def normalize_expected_kb_sources(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [str(x).strip() for x in value if str(x).strip()]
+        return value
