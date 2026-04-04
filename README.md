@@ -19,7 +19,7 @@
 | **Tickets** | Mock `get_ticket(id)` → short narrative via LLM |
 | **Memory** | Per-user history + response cache (`MemoryStore`, default in-process) |
 | **Observability** | Structured logs; optional **LangSmith** (OpenAI wrapper + `rag_retrieval` span) |
-| **Eval** | JSONL datasets + `EvalCase`; **`python -m app.eval.run_eval`** runs all cases, scores **routing** (`question` / `ticket`), writes **`reports/eval_run_*.jsonl`** (gitignored) |
+| **Eval** | JSONL + `EvalCase`; **`python -m app.eval.run_eval`** rebuilds KB, runs **`run_chat_turn`** per row, **exit code = routing only**; optional **LLM judges** (correctness vs reference/rubric, faithfulness vs retrieved chunks) + rule-based **`expected_kb_sources`** → **`reports/eval_run_*.jsonl`** (gitignored) |
 
 ---
 
@@ -119,6 +119,8 @@ Open **http://127.0.0.1:5173**. Set `VITE_API_URL` if the API is not `http://127
 
 **Common optional variables:** `OPENAI_BASE_URL`, `OPENAI_INTENT_MODEL`, `OPENAI_RAG_QA_MODEL`, `OPENAI_TICKET_SUMMARY_MODEL`, `EMBEDDING_MODEL_ID`, `KNOWLEDGE_BASE_DIR`, `RAG_TOP_K`, `CORS_ORIGINS`, `LOG_LEVEL`
 
+**Offline eval judges:** `EVAL_RUN_JUDGES` (default on; `false` = routing-only, faster), `OPENAI_EVAL_JUDGE_MODEL` (optional; defaults to RAG QA model from config). See `.env.example`.
+
 **LangSmith (optional):** `LANGSMITH_API_KEY` or `LANGCHAIN_API_KEY`; enable via `langsmith.enable` in YAML and/or `LANGSMITH_TRACING=true`. See `.env.example`.
 
 Full resolution order is implemented in `app/core/config.py`.
@@ -160,7 +162,7 @@ Full resolution order is implemented in `app/core/config.py`.
 | `app/retrieval/` | Chunking, embeddings, FAISS |
 | `app/memory/` | Chat history + cache |
 | `app/integrations/jira_mock.py` | Mock ticket payload |
-| `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`** (`score_routing`), **`run_eval`** CLI |
+| `app/eval/` | `EvalCase`, `load_dataset`, **`metrics`**, **`judges`** (LLM correctness/faithfulness), **`judge_schemas`**, **`run_eval`** CLI |
 | `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
 | `data/knowledge_base/` | RAG sources (Markdown/text) |
@@ -174,13 +176,21 @@ Full resolution order is implemented in `app/core/config.py`.
 
 - **Logs:** `chat_completed`, `orchestrator_cache_hit` / `miss`, `orchestrator_intent`, `orchestrator_route`, KB build events. Avoid `log_chat_message_body` in production (PII).
 - **LangSmith:** OpenAI calls traced via wrapped client; FAISS retrieval appears as run **`rag_retrieval`** (`run_type: retriever`).
-- **Offline eval (routing):** From the repo root with venv activated and **`OPENAI_API_KEY`** in `.env` (loaded automatically by the runner):
+- **Offline eval harness:** From the repo root with venv activated and **`OPENAI_API_KEY`** in `.env` (runner loads `.env` first):
 
   ```bash
   python -m app.eval.run_eval
   ```
 
-  Rebuilds the KB index, runs each row in `app/eval/datasets/support_eval_v1.jsonl` through **`run_chat_turn`** (fresh `MemoryStore`, `user_id` = `eval-{case_id}`), prints per-case **`route_ok`**, and writes **`reports/eval_run_<UTC_stamp>.jsonl`** (one JSON object per line; includes `response_preview` and `error` rows on failure). Exit code **0** only if every case passes routing. See **`llmops_plan.txt`** for judge metrics, baselines, and CI next steps.
+  **What runs:** Rebuilds the KB index; each line of `app/eval/datasets/support_eval_v1.jsonl` is one case (`reference_answer`, `expected_behavior`, `expected_kb_sources`, routing labels). The runner calls **`run_chat_turn`** with a fresh `MemoryStore` and `user_id` = `eval-{case_id}`. For **`source=question`**, it calls **`retrieve_rag_chunks`** again (same path as production) for judge context and retrieval checks.
+
+  **Console:** `route_ok`, `source`, cache flag, `intent`, and when judges are on: **`cor`** (correctness 0–1), **`faith`** (faithfulness 0–1), **`ret_src`** (all `expected_kb_sources` substrings appear in retrieved chunk text, when that field is set).
+
+  **Report:** **`reports/eval_run_<UTC_stamp>.jsonl`** — `correctness_score` / `correctness_reason`, `faithfulness_*`, `retrieval_sources_ok`, or `*_error` if a judge call fails. **`reports/`** is gitignored.
+
+  **Exit code:** **0** iff every case passes **routing** (branch and ticket key when labeled). Judge scores are informational unless you add CI gates.
+
+  **Toggles:** **`EVAL_RUN_JUDGES=false`** skips judge API calls. **`OPENAI_EVAL_JUDGE_MODEL`** overrides the judge model.
 
 ---
 
@@ -195,7 +205,7 @@ Full resolution order is implemented in `app/core/config.py`.
 
 - Default **in-memory** store (no durable Redis in the hot path).
 - **Mock** tickets only.
-- Automated tests are minimal; use **`run_eval`** for routing regression locally; LangSmith for trace spot-checks.
+- Automated tests are minimal; use **`run_eval`** for routing regression and optional judge metrics locally; LangSmith for trace spot-checks. LLM judges are **noisy**—treat scores as signals, not ground truth.
 
 ---
 
