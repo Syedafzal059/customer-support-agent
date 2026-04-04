@@ -78,6 +78,8 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVAL_RUN_JUDGES: "false"
+          # Direct OpenAI in CI (no Helicone secret required; avoids proxy/header issues).
+          HELICONE_ENABLED: "false"
           LANGCHAIN_TRACING_V2: "false"
           LANGSMITH_TRACING: "false"
         run: python -m app.eval.run_eval

@@ -171,7 +171,7 @@ Full resolution order is implemented in `app/core/config.py`.
 | `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
 | `docs/screenshots/` | README figures: LangSmith trace + Helicone dashboard (proof of wiring) |
-| `.github/workflows/ci.yml` | **GitHub Actions:** Ruff, frontend build, `run_eval` + `regression` (needs **`OPENAI_API_KEY`** secret) |
+| `.github/workflows/ci.yml` | **GitHub Actions:** Ruff, frontend build, `run_eval` + `regression` (**`OPENAI_API_KEY`** secret; CI sets **`HELICONE_ENABLED=false`** so eval hits OpenAI directly) |
 | `requirements-dev.txt` | **`ruff`** for local lint/format (same as CI) |
 | `data/knowledge_base/` | RAG sources (Markdown/text) |
 | `frontend/` | React UI |

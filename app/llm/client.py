@@ -59,6 +59,12 @@ def apply_langsmith_env_from_settings(settings: AppSettings) -> None:
 
 def get_openai_client(settings: AppSettings) -> OpenAI:
     kwargs: dict = {}
+    # Strip so pasted secrets (e.g. GitHub Actions) with trailing newlines do not produce
+    # httpx "Illegal header value" on Authorization / Helicone-Auth.
+    openai_key_raw = os.getenv("OPENAI_API_KEY")
+    if openai_key_raw is not None:
+        kwargs["api_key"] = openai_key_raw.strip()
+
     use_helicone = settings.helicone_enabled and bool(_helicone_api_key())
     if settings.helicone_enabled and not _helicone_api_key():
         logger.warning(
