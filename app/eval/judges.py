@@ -7,7 +7,7 @@ import os
 from app.core.config import AppSettings
 from app.eval.judge_schemas import ScoreWithReason
 from app.eval.schemas import EvalCase
-from app.llm.client import complete_parsed, get_openai_client
+from app.llm.client import complete_parsed, get_openai_client, helicone_extra_headers
 
 
 def _judge_model(settings: AppSettings) -> str:
@@ -50,6 +50,7 @@ def score_correctness_judge(
         model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         ScoreWithReason,
+        extra_headers=helicone_extra_headers(settings, step="eval_correctness_judge"),
     )
 
 
@@ -76,6 +77,7 @@ def score_faithfulness_judge(
         model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         ScoreWithReason,
+        extra_headers=helicone_extra_headers(settings, step="eval_faithfulness_judge"),
     )
 
 

@@ -48,6 +48,8 @@ class AppSettings:
     rag_top_k: int
     langsmith_enabled: bool
     langsmith_project: str
+    helicone_enabled: bool
+    helicone_openai_proxy_base_url: str
 
 
 def _parse_cors_origins(raw: dict) -> tuple[str, ...]:
@@ -125,6 +127,15 @@ def get_settings() -> AppSettings:
         (os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "").strip()
         or str(langsmith_cfg.get("project", "") or "").strip()
     )
+    helicone_cfg = raw.get("helicone") or {}
+    helicone_yaml = bool(helicone_cfg.get("enable", False))
+    helicone_env = _env_bool("HELICONE_ENABLED")
+    helicone_enabled = helicone_env if helicone_env is not None else helicone_yaml
+    helicone_openai_proxy_base_url = (
+        (os.getenv("HELICONE_OPENAI_PROXY_BASE_URL") or "").strip()
+        or str(helicone_cfg.get("openai_proxy_base_url", "") or "").strip()
+        or "https://oai.helicone.ai/v1"
+    )
     cors_origins = _parse_cors_origins(raw)
     return AppSettings(
         app_name=str(app.get("name", "Xactly AI Support")),
@@ -147,4 +158,6 @@ def get_settings() -> AppSettings:
         rag_top_k=rag_top_k,
         langsmith_enabled=langsmith_enabled,
         langsmith_project=langsmith_project,
+        helicone_enabled=helicone_enabled,
+        helicone_openai_proxy_base_url=helicone_openai_proxy_base_url,
     )

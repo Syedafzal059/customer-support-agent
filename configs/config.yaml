@@ -47,3 +47,10 @@ rag:
 langsmith:
   enable: true
   project: "customer_support_dev"
+
+
+# After llm: or near langsmith — Observability / LLM proxy (Phase 4.1)
+helicone:
+  enable: true
+  # OpenAI-compatible proxy base; override if Helicone docs change
+  openai_proxy_base_url: "https://oai.helicone.ai/v1"
