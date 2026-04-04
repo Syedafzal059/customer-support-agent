@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from openai import OpenAIError
+
 from app.api.schemas import ChatRequest, ChatResponse, HealthResponse
 from app.core.config import AppSettings, get_settings
 from app.core.logger import get_logger

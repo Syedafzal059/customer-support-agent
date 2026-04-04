@@ -1,6 +1,7 @@
 """OpenAI client wrapper for chat completions with structured parsing."""
 
 from __future__ import annotations
+
 import os
 from typing import TypeVar
 
@@ -34,6 +35,7 @@ def helicone_extra_headers(
     if step:
         out["Helicone-Property-Step"] = step
     return out or None
+
 
 def _langsmith_api_key() -> str:
     return (os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY") or "").strip()
@@ -81,8 +83,6 @@ def get_openai_client(settings: AppSettings) -> OpenAI:
     from langsmith.wrappers import wrap_openai
 
     return wrap_openai(client)
-
-
 
 
 def complete_parsed(

@@ -128,9 +128,7 @@ def build_rag_qa_messages(
     user_message: str,
 ) -> list[dict[str, str]]:
     context_block = (
-        "\n\n---\n\n".join(context_chunks)
-        if context_chunks
-        else "(no passages retrieved)"
+        "\n\n---\n\n".join(context_chunks) if context_chunks else "(no passages retrieved)"
     )
     history_block = format_history_for_prompt(history)
     user_content = RAG_QA_USER_TEMPLATE.format(

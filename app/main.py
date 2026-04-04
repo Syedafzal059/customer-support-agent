@@ -1,14 +1,15 @@
 """FastAPI application entrypoint."""
 
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import uuid
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+
 from app.api.routes import router
 from app.core.config import get_settings
 from app.core.logger import get_logger, setup_logging
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     rebuild_knowledge_index(settings)
     yield
     logger.info("application_stop", extra={"structured": {}})
+
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:

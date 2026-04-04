@@ -58,9 +58,7 @@ class FaissKnowledgeIndex:
         self._vector_dim = int(vectors.shape[1])
         self._index = faiss.IndexFlatIP(self._vector_dim)
         self._index.add(vectors)
-        self._chunks = [
-            IndexedChunk(text=t, source_relpath=s) for t, s in zip(texts, sources)
-        ]
+        self._chunks = [IndexedChunk(text=t, source_relpath=s) for t, s in zip(texts, sources)]
         logger.info(
             "knowledge_index_built",
             extra={

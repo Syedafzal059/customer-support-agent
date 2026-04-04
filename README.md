@@ -171,6 +171,8 @@ Full resolution order is implemented in `app/core/config.py`.
 | `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
 | `docs/screenshots/` | README figures: LangSmith trace + Helicone dashboard (proof of wiring) |
+| `.github/workflows/ci.yml` | **GitHub Actions:** Ruff, frontend build, `run_eval` + `regression` (needs **`OPENAI_API_KEY`** secret) |
+| `requirements-dev.txt` | **`ruff`** for local lint/format (same as CI) |
 | `data/knowledge_base/` | RAG sources (Markdown/text) |
 | `frontend/` | React UI |
 | `plan.txt` | Build phases |
@@ -196,7 +198,7 @@ Together they answer: *Is the app healthy? For this one request, what did it act
 | Match a browser/API call to a trace or log line | Response header **`X-Request-ID`** (same value is stored on the **`chat_turn`** trace) |
 | See cache hits, which path ran (KB vs ticket), errors | Server terminal: JSON log lines whose **`message`** is `orchestrator_*` or `chat_completed` |
 | Get scores for many fixed test questions | Run **`python -m app.eval.run_eval`** → read **`reports/eval_run_*.jsonl`** |
-| CI check: “did we break routing?” | After `run_eval`, run **`python -m app.eval.regression`** with the latest report vs **`app/eval/regression_baseline.json`** |
+| CI check: “did we break routing?” | On push/PR to **`main`**, Actions runs **`run_eval`** (judges off) then **`regression`**; add repo secret **`OPENAI_API_KEY`**. Fork PRs skip the eval job (no secrets). Locally: run **`python -m app.eval.regression`** on the latest **`reports/eval_run_*.jsonl`** vs **`app/eval/regression_baseline.json`**. |
 
 ---
 

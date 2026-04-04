@@ -1,15 +1,15 @@
 """Compare eval JSONL report to regression_baseline.json (routing only)."""
 
-
 from __future__ import annotations
+
 import argparse
 import json
 import sys
 from pathlib import Path
 
 
-def load_jsonl_by_case_id(path:Path) -> dict[str, dict]:
-    out: dict[str, dict] ={}
+def load_jsonl_by_case_id(path: Path) -> dict[str, dict]:
+    out: dict[str, dict] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -48,6 +48,6 @@ def main() -> int:
             failed = True
     return 1 if failed else 0
 
-    
+
 if __name__ == "__main__":
     raise SystemExit(main())

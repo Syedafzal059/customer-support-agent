@@ -124,9 +124,8 @@ def get_settings() -> AppSettings:
         ls_tracing_env = _env_bool("LANGCHAIN_TRACING_V2")
     langsmith_enabled = ls_tracing_env if ls_tracing_env is not None else yaml_ls_enable
     langsmith_project = (
-        (os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "").strip()
-        or str(langsmith_cfg.get("project", "") or "").strip()
-    )
+        os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or ""
+    ).strip() or str(langsmith_cfg.get("project", "") or "").strip()
     helicone_cfg = raw.get("helicone") or {}
     helicone_yaml = bool(helicone_cfg.get("enable", False))
     helicone_env = _env_bool("HELICONE_ENABLED")

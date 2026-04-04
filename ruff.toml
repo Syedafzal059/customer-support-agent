@@ -1,0 +1,17 @@
+target-version = "py310"
+line-length = 100
+
+exclude = [
+    ".git",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    "frontend/node_modules",
+    "frontend/dist",
+    "reports",
+]
+
+[lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+

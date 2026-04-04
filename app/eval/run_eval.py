@@ -11,7 +11,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from app.core.config import get_settings
-from app.llm.client import apply_langsmith_env_from_settings
 from app.eval.judges import (
     score_correctness_judge,
     score_faithfulness_judge,
@@ -19,6 +18,7 @@ from app.eval.judges import (
 )
 from app.eval.load_dataset import default_dataset_path, load_eval_cases
 from app.eval.metrics import score_routing
+from app.llm.client import apply_langsmith_env_from_settings
 from app.memory.redis_client import MemoryStore
 from app.orchestrator.agent import MissingOpenAIKeyError, retrieve_rag_chunks, run_chat_turn
 from app.retrieval.faiss_store import get_knowledge_index, rebuild_knowledge_index

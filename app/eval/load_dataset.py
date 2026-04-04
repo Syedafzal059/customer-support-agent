@@ -1,9 +1,11 @@
 """Load evaluation datasets (JSONL) into EvalCase rows."""
 
 from __future__ import annotations
-import json 
+
+import json
 from collections.abc import Iterator
 from pathlib import Path
+
 from app.eval.schemas import EvalCase
 
 
@@ -26,11 +28,9 @@ def iter_eval_cases_jsonl(path: Path | str) -> Iterator[EvalCase]:
                 raise ValueError(f"{p}:{line_no}: invalid EvalCase: {e}") from e
 
 
-
 def load_eval_cases(path: Path | str) -> list[EvalCase]:
     """Load the whole JSONL into memory (fine for small regression sets)."""
     return list(iter_eval_cases_jsonl(path))
-
 
 
 def default_dataset_path() -> Path:
