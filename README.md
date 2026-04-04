@@ -174,23 +174,76 @@ Full resolution order is implemented in `app/core/config.py`.
 
 ## Observability & evaluation
 
-- **Logs:** `chat_completed`, `orchestrator_cache_hit` / `miss`, `orchestrator_intent`, `orchestrator_route`, KB build events. Avoid `log_chat_message_body` in production (PII).
-- **LangSmith:** OpenAI calls traced via wrapped client; FAISS retrieval appears as run **`rag_retrieval`** (`run_type: retriever`).
-- **Offline eval harness:** From the repo root with venv activated and **`OPENAI_API_KEY`** in `.env` (runner loads `.env` first):
+The service is instrumented so you can operate it like a production LLM stack: **machine-readable logs** for throughput and routing, **LLM-native traces** for prompt chains and retrieval, and an **offline harness** for regression on routing and (optionally) answer quality. Together they answer: *Did we route correctly? What did retrieval return? What did the model say—and was it grounded?*
 
-  ```bash
-  python -m app.eval.run_eval
-  ```
+### Structured logging (JSON lines)
 
-  **What runs:** Rebuilds the KB index; each line of `app/eval/datasets/support_eval_v1.jsonl` is one case (`reference_answer`, `expected_behavior`, `expected_kb_sources`, routing labels). The runner calls **`run_chat_turn`** with a fresh `MemoryStore` and `user_id` = `eval-{case_id}`. For **`source=question`**, it calls **`retrieve_rag_chunks`** again (same path as production) for judge context and retrieval checks.
+All `app.*` loggers use `JsonLogFormatter` (`app/core/logger.py`): **one UTF-8 JSON object per line** on stdout with `timestamp` (UTC ISO), `level`, `logger`, `message`, and optional `extra` (the structured business fields) and `exception` for stack traces. Ship these lines to your log platform and filter on `message` or index `extra.*` for dashboards (cache hit ratio, intent distribution, empty-index incidents).
 
-  **Console:** `route_ok`, `source`, cache flag, `intent`, and when judges are on: **`cor`** (correctness 0–1), **`faith`** (faithfulness 0–1), **`ret_src`** (all `expected_kb_sources` substrings appear in retrieved chunk text, when that field is set).
+**PII policy:** `POST /chat` logs **`chat_completed`** with `user_id`, `message_length`, `chat_history_prior_count`, `source`, `cached`, and `intent` when present. The raw user **message** is included only when `log_chat_message_body` is true in settings—**keep it false in production**.
 
-  **Report:** **`reports/eval_run_<UTC_stamp>.jsonl`** — `correctness_score` / `correctness_reason`, `faithfulness_*`, `retrieval_sources_ok`, or `*_error` if a judge call fails. **`reports/`** is gitignored.
+| `message` (event) | When | Notable `extra` fields |
+|---------------------|------|-------------------------|
+| `application_start` | Lifespan startup | `app_name`, `debug` |
+| `application_stop` | Lifespan shutdown | — |
+| `knowledge_index_built` | KB loaded with chunks | `kb_dir`, `chunk_count`, `embedding_model` |
+| `knowledge_index_empty` | KB dir OK but no ingestible content | `kb_dir` |
+| `knowledge_base_missing` | Configured KB path not a directory | `path` |
+| `knowledge_file_read_failed` | Per-file read error during ingest | `path`, `error` |
+| `knowledge_index_build_failed` | Embedding/index build threw | `model` (+ exception on line) |
+| `knowledge_index_fallback_empty_failed` | Fallback after build failure also failed | exception on line |
+| `orchestrator_cache_hit` | Response served from cache | `user_id`, `source`, `response_length` |
+| `orchestrator_cache_miss` | Cache miss; LLM path | `user_id` |
+| `orchestrator_intent` | After structured intent parse | `user_id`, `intent`, `ticket_id`, `intent_confidence`, `intent_rationale` |
+| `orchestrator_route` | After RAG or ticket branch runs | `user_id`, `branch`, `kb_chunk_count` |
+| `orchestrator_llm_failed` | OpenAI/runtime error in orchestrator | `user_id` (+ exception) |
+| `chat_completed` | Successful HTTP response | see PII policy above |
 
-  **Exit code:** **0** iff every case passes **routing** (branch and ticket key when labeled). Judge scores are informational unless you add CI gates.
+**How to debug:** Cache issues → `orchestrator_cache_*`. Wrong branch or ticket key → `orchestrator_intent` + `orchestrator_route`. Empty or wrong RAG answers → `knowledge_index_*` and LangSmith **`rag_retrieval`**. 5xx from OpenAI → `orchestrator_llm_failed` and provider traces.
 
-  **Toggles:** **`EVAL_RUN_JUDGES=false`** skips judge API calls. **`OPENAI_EVAL_JUDGE_MODEL`** overrides the judge model.
+### Distributed tracing (LangSmith)
+
+When tracing is enabled (`langsmith.enable` in YAML and/or `LANGSMITH_TRACING=true`, plus `LANGSMITH_API_KEY` / `LANGCHAIN_API_KEY`), `get_openai_client` returns **`wrap_openai(OpenAI)`** so **every chat completion** (intent, RAG answer, ticket narrative, eval judges) becomes a **nested run** in LangSmith under the configured **project**.
+
+Retrieval is explicitly marked for evals and retrieval debugging: **`retrieve_rag_chunks`** is decorated with **`@traceable(name="rag_retrieval", run_type="retriever")`**, so FAISS top‑k appears as a **retriever**-typed span with chunk text in outputs—useful for grounding audits and comparing offline eval retrieval to live traces.
+
+There is no HTTP `trace_id` propagated from FastAPI today; **correlate** live traffic with **`user_id`** in logs and time window, or rely on LangSmith’s run tree for a single request once nesting is attached to your deployment pattern.
+
+### Offline evaluation harness
+
+Run from repo root with venv and **`OPENAI_API_KEY`** in `.env` (runner loads `.env` first):
+
+```bash
+python -m app.eval.run_eval
+```
+
+**Purpose:** Treat the JSONL dataset as a **versioned contract** for routing and (optionally) quality. Each row is an `EvalCase`: expected route, optional ticket key, `reference_answer` / `expected_behavior` for judges, and `expected_kb_sources` for deterministic substring checks on retrieved chunk text.
+
+**Execution model:** Rebuilds the KB index; per row, **`run_chat_turn`** with a fresh `MemoryStore` and `user_id` = `eval-{case_id}`. For `source=question`, the runner calls **`retrieve_rag_chunks`** again on the same code path as production, then runs LLM judges if enabled.
+
+**Artifacts:** Console columns include `route_ok`, `source`, cache flag, `intent`, and when judges run: `cor`, `faith`, `ret_src`. **`reports/eval_run_<UTC_stamp>.jsonl`** (gitignored) stores `correctness_*`, `faithfulness_*`, `retrieval_sources_ok`, or `*_error` fields for diffing across commits.
+
+**Exit code:** `0` only if **routing branch** matches `route_expected` for every case (CI-friendly gate). Extracted ticket **key** is not part of this gate yet—see **Evaluation metrics** below. Judge scores are **signals**, not pass/fail unless you add thresholds.
+
+**Cost / speed:** `EVAL_RUN_JUDGES=false` skips judge API calls; `OPENAI_EVAL_JUDGE_MODEL` overrides the judge model (defaults to RAG QA model from config).
+
+### Evaluation metrics (what we measure and why)
+
+The codebase does **not** ship a live request counter or latency histogram (see **Scope** below). What we **do** measure deliberately is offline **quality and routing** so changes to prompts, models, or the KB show up as comparable numbers and booleans in JSONL.
+
+| Metric | Type | Definition | Why it exists |
+|--------|------|------------|----------------|
+| **Routing match** | Boolean (gates exit code) | `outcome.source` equals `route_expected` (`question` vs `ticket`) from `score_routing` | Wrong branch means the wrong tool path (RAG vs ticket narrative). This is **deterministic**, cheap, and the strongest automated guardrail in the harness—suitable for CI. |
+| **Ticket ID match** | Reserved | `EvalCase.ticket_id_expected` is in the schema; `RoutingMetrics.ticket_id_matches_expected` is not wired to outcomes yet (orchestrator does not expose extracted `ticket_id` on `ChatTurnOutcome`) | Once exposed, you can assert the classifier extracted the right issue key without brittle string checks on the full reply. |
+| **Correctness** | 0–1 + short reason (LLM judge) | Compares the assistant reply to `reference_answer` or `expected_behavior` | KB answers and rubric-style cases rarely match word‑for‑word; a judge scores **semantic alignment** and rubric compliance. Use for **regression trends**, not as legal proof. |
+| **Faithfulness** | 0–1 + short reason (LLM judge) | Scores whether the reply is **supported by** the retrieved chunks only | Separates “sounds right” from **grounded**: catches hallucinations and overreach when retrieval is wrong or incomplete. Paired with LangSmith **`rag_retrieval`**, you can see *context* vs *answer*. |
+| **Retrieval sources OK** | Boolean (rule-based) | Every substring in `expected_kb_sources` appears somewhere in the concatenated retrieved chunk text (e.g. source path `sample_support.md`) | **Deterministic** check that the right document (or path) surfaced in top‑k—fast feedback on indexing, chunking, or embedding regressions without another LLM call. |
+
+**Why this split:** Routing + retrieval substrings are **objective** and stable run‑to‑run. LLM judges add **semantic** signal where labels are rubrics or paraphrases, at the cost of variance and API spend—so they inform dashboards and PR review, while only routing drives the default exit code.
+
+### Scope (what is not included)
+
+There is no bundled **metrics** exporter (e.g. Prometheus); derive SLIs from log aggregates or add middleware later. **LLM-as-judge** scores are useful for drift monitoring but are not a substitute for human review on high-risk content.
 
 ---
 
@@ -205,7 +258,7 @@ Full resolution order is implemented in `app/core/config.py`.
 
 - Default **in-memory** store (no durable Redis in the hot path).
 - **Mock** tickets only.
-- Automated tests are minimal; use **`run_eval`** for routing regression and optional judge metrics locally; LangSmith for trace spot-checks. LLM judges are **noisy**—treat scores as signals, not ground truth.
+- Automated tests are minimal; pair **`run_eval`** and LangSmith as described under **Observability & evaluation**.
 
 ---
 
