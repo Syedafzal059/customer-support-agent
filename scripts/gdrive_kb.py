@@ -27,7 +27,6 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from chunker import chunk_text, make_chunk_id  # noqa: E402
-
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -117,7 +116,7 @@ def check_connection() -> int:
             print(
                 "FAIL  Google Drive API is not enabled for this GCP project.\n"
                 "      Enable it: https://console.cloud.google.com/apis/library/drive.googleapis.com"
-                f"?project=customer-support-agent-501616\n"
+                "?project=customer-support-agent-501616\n"
                 "      Wait 1–2 minutes, then rerun: python scripts/gdrive_kb.py --check",
                 file=sys.stderr,
             )
@@ -329,8 +328,7 @@ def run() -> tuple[list[dict], list[dict]]:
             }
         )
         print(
-            f"DELETED  {name}: removed from sync "
-            f"(file_id {file_id}, {chunk_count} stale chunk(s))"
+            f"DELETED  {name}: removed from sync (file_id {file_id}, {chunk_count} stale chunk(s))"
         )
 
     save_sync_state(sync_state)
