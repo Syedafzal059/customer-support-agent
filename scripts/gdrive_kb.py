@@ -1,7 +1,7 @@
 """
-Phase 1 — Google Drive PDF ingestion (list + download + extract only).
-No FAISS, no chunking, no embeddings yet — this file's only job is to prove
-we can reliably pull clean text out of every PDF in a Drive folder.
+Phase 1–2 — Google Drive PDF ingestion + paragraph-aware chunking.
+Lists PDFs, downloads changed files, extracts text, and chunks into stable
+chunk dicts. No FAISS or embeddings yet — Phase 3 will embed and index.
 
 Setup:
     pip install google-api-python-client google-auth pypdf
@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from chunker import chunk_text, make_chunk_id  # noqa: E402
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -87,6 +89,11 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def chunk_ids_for_file(file_id: str, chunk_count: int) -> list[int]:
+    """Reconstruct deterministic chunk IDs from a prior sync entry."""
+    return [make_chunk_id(file_id, i) for i in range(chunk_count)]
+
+
 def get_drive_service():
     sa_path = _service_account_path()
     if not sa_path.is_file():
@@ -109,7 +116,7 @@ def check_connection() -> int:
             print(
                 "FAIL  Google Drive API is not enabled for this GCP project.\n"
                 "      Enable it: https://console.cloud.google.com/apis/library/drive.googleapis.com"
-                f"?project=customer-support-agent-501616\n"
+                "?project=customer-support-agent-501616\n"
                 "      Wait 1–2 minutes, then rerun: python scripts/gdrive_kb.py --check",
                 file=sys.stderr,
             )
@@ -177,7 +184,7 @@ def extract_text(pdf_bytes: bytes, filename: str):
         return None
 
 
-def run() -> list[dict]:
+def run() -> tuple[list[dict], list[dict]]:
     folder_id = _folder_id()
     if not folder_id:
         raise SystemExit(
@@ -201,7 +208,16 @@ def run() -> list[dict]:
 
     sync_state = load_sync_state()
     results: list[dict] = []
+    removals: list[dict] = []
     unchanged_count = 0
+
+    current_file_ids = {file_meta["id"] for file_meta in files}
+    orphaned_ids = {file_id for file_id in sync_state if file_id not in current_file_ids}
+    orphaned_by_name: dict[str, str] = {
+        sync_state[file_id]["name"]: file_id
+        for file_id in orphaned_ids
+        if sync_state[file_id].get("name")
+    }
 
     for file_meta in files:
         file_id = file_meta["id"]
@@ -229,12 +245,56 @@ def run() -> list[dict]:
 
         if prior and prior.get("hash") == new_hash:
             unchanged_count += 1
-            sync_state[file_id] = {"hash": new_hash, "name": name, "modified_time": modified_time}
+            sync_state[file_id] = {
+                "hash": new_hash,
+                "name": name,
+                "modified_time": modified_time,
+                "chunk_count": int(prior.get("chunk_count", 0)),
+            }
             print(f"  SKIP  {name}: unchanged (hash {new_hash[:10]}..., modifiedTime drift)")
             continue
 
-        status = "NEW" if prior is None else "CHANGED"
-        print(f"  OK    {status}, extracted {len(text)} chars, hash {new_hash[:10]}...")
+        chunks = chunk_text(text, file_id=file_id, source_name=name)
+
+        if prior is None and name in orphaned_by_name:
+            old_file_id = orphaned_by_name.pop(name)
+            orphaned_ids.discard(old_file_id)
+            old_entry = sync_state.pop(old_file_id)
+            old_chunk_count = int(old_entry.get("chunk_count", 0))
+            removals.append(
+                {
+                    "file_id": old_file_id,
+                    "name": old_entry.get("name", name),
+                    "reason": "REPLACED",
+                    "chunk_ids": chunk_ids_for_file(old_file_id, old_chunk_count),
+                }
+            )
+            status = "REPLACED"
+            print(
+                f"  OK    {name}: REPLACED (old file_id {old_file_id} reconciled by name), "
+                f"extracted {len(text)} chars, {len(chunks)} chunk(s), hash {new_hash[:10]}..."
+            )
+        elif prior is None:
+            status = "NEW"
+            print(
+                f"  OK    {status}, extracted {len(text)} chars, "
+                f"{len(chunks)} chunk(s), hash {new_hash[:10]}..."
+            )
+        else:
+            status = "CHANGED"
+            old_chunk_count = int(prior.get("chunk_count", 0))
+            removals.append(
+                {
+                    "file_id": file_id,
+                    "name": name,
+                    "reason": "CHANGED",
+                    "chunk_ids": chunk_ids_for_file(file_id, old_chunk_count),
+                }
+            )
+            print(
+                f"  OK    {status}, extracted {len(text)} chars, "
+                f"{len(chunks)} chunk(s), hash {new_hash[:10]}..."
+            )
 
         results.append(
             {
@@ -244,17 +304,42 @@ def run() -> list[dict]:
                 "char_count": len(text),
                 "hash": new_hash,
                 "status": status,
+                "chunk_count": len(chunks),
+                "chunks": chunks,
             }
         )
-        sync_state[file_id] = {"hash": new_hash, "name": name, "modified_time": modified_time}
+        sync_state[file_id] = {
+            "hash": new_hash,
+            "name": name,
+            "modified_time": modified_time,
+            "chunk_count": len(chunks),
+        }
+
+    for file_id in orphaned_ids:
+        entry = sync_state.pop(file_id)
+        name = entry.get("name", file_id)
+        chunk_count = int(entry.get("chunk_count", 0))
+        removals.append(
+            {
+                "file_id": file_id,
+                "name": name,
+                "reason": "DELETED",
+                "chunk_ids": chunk_ids_for_file(file_id, chunk_count),
+            }
+        )
+        print(
+            f"DELETED  {name}: removed from sync (file_id {file_id}, {chunk_count} stale chunk(s))"
+        )
 
     save_sync_state(sync_state)
 
+    total_chunks = sum(r["chunk_count"] for r in results)
     print(
-        f"\nDone. {len(results)} new/changed, {unchanged_count} unchanged (skipped), "
+        f"\nDone. {len(results)} new/changed/replaced ({total_chunks} chunk(s)), "
+        f"{len(removals)} removed, {unchanged_count} unchanged (skipped), "
         f"out of {len(files)} total PDF(s)."
     )
-    return results
+    return results, removals
 
 
 def main() -> int:
