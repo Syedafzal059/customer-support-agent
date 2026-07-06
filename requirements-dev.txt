@@ -1,2 +1,8 @@
 # Local + CI lint (install: pip install -r requirements-dev.txt)
 ruff>=0.8.0,<1.0.0
+
+# Google Drive KB ingestion (scripts/gdrive_kb.py)
+python-dotenv>=1.0.0,<2.0.0
+google-api-python-client>=2.100.0,<3.0.0
+google-auth>=2.23.0,<3.0.0
+pypdf>=5.0.0,<7.0.0

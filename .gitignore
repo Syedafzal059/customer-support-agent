@@ -17,6 +17,10 @@ htmlcov/
 Thumbs.db
 reports/
 data/feedback/*.jsonl
+data/gdrive_sync_state.json
+# Google Drive service account (never commit)
+scripts/*.json
+service_account.json
 # Phase 11 — Vite + React
 frontend/node_modules/
 frontend/dist/
