@@ -18,6 +18,7 @@
 | **API** | `POST /chat` — cache → intent → RAG or ticket path; `POST /feedback`; `GET /health` |
 | **Routing** | OpenAI `parse` → `question` \| `ticket` (no hand-written keyword routers) |
 | **RAG** | Chunk KB → embed → FAISS `IndexFlatIP`; top-k context → grounded completion |
+| **Drive KB sync** | Offline script: list Drive PDFs → extract text → paragraph chunks with stable IDs (Phase 1–2; not yet wired to chat RAG) |
 | **Tickets** | Mock `get_ticket(id)` → short narrative via LLM |
 | **Memory** | Per-user history + response cache (`MemoryStore`, default in-process) |
 | **Observability** | JSON **logs**; **`X-Request-ID`**; **LangSmith** traces; optional **Helicone** proxy for cost/latency dashboards ([screenshots](#live-integrations-screenshots)) |
@@ -27,6 +28,8 @@
 ---
 
 ## Architecture
+
+### Chat API (runtime)
 
 ```mermaid
 flowchart LR
@@ -46,7 +49,7 @@ flowchart LR
   end
   subgraph data [Data]
     KB[(Markdown KB)]
-    FAISS[FAISS]
+    FAISS[FAISS in-memory]
     MOCK[Jira mock]
   end
   UI --> CHAT
@@ -63,6 +66,80 @@ flowchart LR
 
 **Lifecycle:** App startup builds the in-memory index from `data/knowledge_base`. **Per turn:** cache lookup → on miss, intent → either `retrieve_rag_chunks` + `generate_rag_answer` or ticket path + `generate_ticket_narrative`.
 
+### Google Drive KB pipeline (offline, Phase 1–2)
+
+Separate from the chat API: a sync script pulls PDFs from a shared Google Drive folder, extracts text, and chunks them for a future vector index. **Phase 3** (embed + FAISS persist) and **Phase 4** (wire into `POST /chat`) are not implemented yet.
+
+```mermaid
+flowchart TD
+  subgraph setup [Setup]
+    ENV[.env: GDRIVE_FOLDER_ID]
+    SA[Service account JSON]
+  end
+  subgraph sync [scripts/gdrive_kb.py]
+    LIST[List PDFs in folder]
+    STATE[Load sync state]
+    DIFF{Changed?}
+    DL[Download PDF]
+    EXT[Extract text pypdf]
+    HASH[SHA-256 hash]
+    CHK[chunk_text]
+    UPSERT[results: chunks to index]
+    REMOVE[removals: chunk_ids to delete]
+    SAVE[Save sync state]
+  end
+  subgraph chunker [scripts/chunker.py]
+    PARA[Split paragraphs]
+    GROUP[~400 char chunks + 50 char overlap]
+    ID[Deterministic chunk_id]
+  end
+  subgraph disk [On disk today]
+    SYNCJSON[data/gdrive_sync_state.json]
+  end
+  subgraph future [Phase 3+ not built]
+    EMB[Embed chunks]
+    IDX[(FAISS index)]
+    CHAT2[POST /chat RAG]
+  end
+  ENV --> LIST
+  SA --> LIST
+  LIST --> STATE
+  STATE --> DIFF
+  DIFF -->|unchanged| SAVE
+  DIFF -->|new/changed| DL
+  DL --> EXT --> HASH --> CHK
+  CHK --> PARA --> GROUP --> ID
+  ID --> UPSERT
+  ID --> REMOVE
+  UPSERT --> SAVE
+  REMOVE --> SAVE
+  SAVE --> SYNCJSON
+  UPSERT -.-> EMB
+  REMOVE -.-> IDX
+  EMB -.-> IDX
+  IDX -.-> CHAT2
+```
+
+| Step | Module | Output |
+|------|--------|--------|
+| **List & diff** | `gdrive_kb.py` | Skip unchanged PDFs via `modifiedTime` + content hash |
+| **Extract** | `gdrive_kb.py` | Plain text from each PDF (skip scanned/empty) |
+| **Chunk** | `chunker.py` | `{chunk_id, file_id, source_name, chunk_index, text}` |
+| **Sync ledger** | `data/gdrive_sync_state.json` | Per-file `hash`, `name`, `modified_time`, `chunk_count` |
+| **Upsert plan** | `run()` return `results` | New/changed/replaced files + full chunk list (in memory) |
+| **Removal plan** | `run()` return `removals` | `DELETED` / `REPLACED` / `CHANGED` + `chunk_ids` to drop |
+
+**Run sync (from repo root):**
+
+```bash
+pip install -r requirements-dev.txt   # google-api-python-client, pypdf, python-dotenv
+python scripts/gdrive_kb.py --check   # verify Drive auth
+python scripts/gdrive_kb.py           # incremental sync
+python scripts/chunker.py             # standalone chunker demo
+```
+
+Set `GDRIVE_FOLDER_ID` and place the service account JSON under `scripts/` (see `.env.example`). Share the Drive folder with the service account email. `gdrive_sync_state.json` is gitignored (local sync ledger only).
+
 ---
 
 ## Tech stack
@@ -71,7 +148,8 @@ flowchart LR
 |------|--------|
 | API | FastAPI, Pydantic v2, Uvicorn |
 | LLM | OpenAI API (`chat.completions`, structured parse for intent) |
-| Embeddings / RAG | sentence-transformers, FAISS (CPU), tiktoken chunking |
+| Embeddings / RAG | sentence-transformers, FAISS (CPU), tiktoken chunking (chat API) |
+| Drive KB | Google Drive API, pypdf, paragraph char-chunking (`scripts/chunker.py`) |
 | UI | React 18, Vite 5, static `serve` on `:5173` |
 | Config | `configs/config.yaml` + `.env` overrides |
 | Tracing | LangSmith (`wrap_openai` + `@traceable` spans; startup **project** sync). Optional **Helicone** OpenAI proxy (`app/llm/client.py`). |
@@ -121,6 +199,8 @@ Open **http://127.0.0.1:5173**. Set `VITE_API_URL` if the API is not `http://127
 **Required for LLM paths:** `OPENAI_API_KEY`
 
 **Common optional variables:** `OPENAI_BASE_URL`, `OPENAI_INTENT_MODEL`, `OPENAI_RAG_QA_MODEL`, `OPENAI_TICKET_SUMMARY_MODEL`, `EMBEDDING_MODEL_ID`, `KNOWLEDGE_BASE_DIR`, `RAG_TOP_K`, `CORS_ORIGINS`, `LOG_LEVEL`
+
+**Google Drive KB sync (optional, offline script):** `GDRIVE_FOLDER_ID`, `GDRIVE_SA_FILE`, `SYNC_STATE_FILE` — see `.env.example` and [Google Drive KB pipeline](#google-drive-kb-pipeline-offline-phase-12).
 
 **Offline eval judges:** `EVAL_RUN_JUDGES` (default on; `false` = routing-only, faster), `OPENAI_EVAL_JUDGE_MODEL` (optional; defaults to RAG QA model from config). See `.env.example`.
 
@@ -199,9 +279,12 @@ Draft eval JSONL from the review file: **`python -m app.eval.promote_feedback`**
 | `configs/config.yaml` | Non-secret defaults |
 | `docs/screenshots/` | README figures: **UI**, LangSmith trace, Helicone dashboard |
 | `.github/workflows/ci.yml` | **GitHub Actions:** Ruff, frontend build, `run_eval` + `regression` (**`OPENAI_API_KEY`** secret; CI sets **`HELICONE_ENABLED=false`** so eval hits OpenAI directly) |
-| `requirements-dev.txt` | **`ruff`** for local lint/format (same as CI) |
+| `requirements-dev.txt` | Ruff (CI lint) + Drive sync deps (`google-api-python-client`, `pypdf`, …) |
 | `data/feedback/` | Runtime **`events.jsonl`** / **`review_queue.jsonl`** (gitignored); **`.gitkeep`** only in git |
-| `data/knowledge_base/` | RAG sources (Markdown/text) |
+| `data/knowledge_base/` | RAG sources (Markdown/text) for chat API |
+| `data/gdrive_sync_state.json` | Drive sync ledger (gitignored; `hash`, `chunk_count` per PDF) |
+| `scripts/gdrive_kb.py` | Drive PDF list → download → extract → chunk; returns `results` + `removals` |
+| `scripts/chunker.py` | Paragraph-aware chunker with deterministic `chunk_id`s |
 | `frontend/` | React UI |
 | `plan.txt` | Build phases |
 | `llmops_plan.txt` | LLMOps / eval roadmap (reference) |
@@ -359,6 +442,7 @@ There is no built-in **Prometheus** exporter; you would aggregate from logs or a
 
 - Default **in-memory** store (no durable Redis in the hot path).
 - **Mock** tickets only.
+- **Drive PDFs** are synced and chunked offline but **not** yet searchable from `POST /chat` (Phase 3–4).
 - Automated tests are minimal; pair **`run_eval`** and LangSmith as described under **Observability & evaluation**.
 
 ---
