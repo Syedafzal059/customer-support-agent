@@ -66,9 +66,7 @@ def init_db() -> None:
     except ChunkStoreConnectionError:
         raise
     except sqlite3.Error as exc:
-        raise ChunkStoreOperationError(
-            f"Failed to initialize chunk store schema: {exc}"
-        ) from exc
+        raise ChunkStoreOperationError(f"Failed to initialize chunk store schema: {exc}") from exc
 
 
 def save_chunks(chunks: list[dict[str, Any]]) -> None:
@@ -155,9 +153,7 @@ def get_chunk_text(chunk_id: int) -> dict[str, str | int] | None:
     except ChunkStoreConnectionError:
         raise
     except sqlite3.Error as exc:
-        raise ChunkStoreOperationError(
-            f"Failed to look up chunk_id {chunk_id}: {exc}"
-        ) from exc
+        raise ChunkStoreOperationError(f"Failed to look up chunk_id {chunk_id}: {exc}") from exc
 
     if row is None:
         return None

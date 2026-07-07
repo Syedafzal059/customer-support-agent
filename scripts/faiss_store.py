@@ -51,9 +51,7 @@ def load_index(path: str | None = None, dim: int = VECTOR_DIM) -> faiss.IndexIDM
         try:
             return faiss.read_index(index_path)
         except Exception as exc:
-            raise FaissStoreError(
-                f"Failed to read FAISS index from {index_path!r}: {exc}"
-            ) from exc
+            raise FaissStoreError(f"Failed to read FAISS index from {index_path!r}: {exc}") from exc
     return build_index(dim)
 
 
@@ -76,9 +74,7 @@ def save_index(index: faiss.IndexIDMap, path: str | None = None) -> None:
                 os.remove(tmp_path)
             except OSError:
                 pass
-        raise FaissStoreError(
-            f"Failed to save FAISS index to {index_path!r}: {exc}"
-        ) from exc
+        raise FaissStoreError(f"Failed to save FAISS index to {index_path!r}: {exc}") from exc
 
 
 def add_chunks(
@@ -92,18 +88,14 @@ def add_chunks(
 
     expected_rows = len(chunk_ids)
     if vectors.ndim != 2:
-        raise ValueError(
-            f"vectors must be 2-D (n, dim); got shape {vectors.shape!r}"
-        )
+        raise ValueError(f"vectors must be 2-D (n, dim); got shape {vectors.shape!r}")
     if vectors.shape[0] != expected_rows:
         raise ValueError(
             f"len(chunk_ids)={expected_rows} but vectors has "
             f"{vectors.shape[0]} rows (shape {vectors.shape!r})"
         )
     if vectors.shape[1] != index.d:
-        raise ValueError(
-            f"vectors dim {vectors.shape[1]} does not match index dim {index.d}"
-        )
+        raise ValueError(f"vectors dim {vectors.shape[1]} does not match index dim {index.d}")
 
     id_array = np.array(chunk_ids, dtype="int64")
     index.add_with_ids(vectors.astype("float32"), id_array)
@@ -146,9 +138,7 @@ def search(
             f"query_vector must be 1-D (dim,) or 2-D (1, dim); got shape {query.shape!r}"
         )
     if query.shape[1] != index.d:
-        raise ValueError(
-            f"query dim {query.shape[1]} does not match index dim {index.d}"
-        )
+        raise ValueError(f"query dim {query.shape[1]} does not match index dim {index.d}")
 
     distances, ids = index.search(query, k)
     results: list[tuple[int, float]] = []
