@@ -266,7 +266,7 @@ def run() -> tuple[list[dict], list[str], dict[str, str]]:
         if prior is None and name in orphaned_by_name:
             old_file_id = orphaned_by_name.pop(name)
             orphaned_ids.discard(old_file_id)
-            old_entry = sync_state.pop(old_file_id)
+            sync_state.pop(old_file_id)
             removal_ids.append(old_file_id)
             status = "REPLACED"
             print(
