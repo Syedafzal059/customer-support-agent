@@ -18,9 +18,11 @@ OVERLAP_SIZE = 50  # characters of overlap carried into the next chunk
 
 def make_chunk_id(file_id: str, chunk_index: int) -> int:
     """Deterministic integer ID: same file_id + position always yields the
-    same ID, so Phase 3 can look up and remove exact chunk sets on file changes."""
+    same ID, so Phase 3 can look up and remove exact chunk sets on file changes.
+
+    Masked to signed int64 range for SQLite INTEGER and FAISS int64 IDs."""
     raw = f"{file_id}:{chunk_index}".encode("utf-8")
-    return int(hashlib.sha256(raw).hexdigest()[:16], 16)
+    return int(hashlib.sha256(raw).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
 
 
 def split_paragraphs(text: str) -> list[str]:
