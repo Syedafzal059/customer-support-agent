@@ -1,7 +1,7 @@
 """
 Phase 1–2 — Google Drive PDF ingestion + paragraph-aware chunking.
 Lists PDFs, downloads changed files, extracts text, and chunks into stable
-chunk dicts. No FAISS or embeddings yet — Phase 3 will embed and index.
+chunk dicts. Returns metadata + text for sync_pipeline.py to embed and index.
 
 Setup:
     pip install google-api-python-client google-auth pypdf
@@ -9,6 +9,12 @@ Setup:
 Usage (from repo root):
     python scripts/gdrive_kb.py
     python scripts/gdrive_kb.py --check
+
+Returns from run():
+    (results, removal_ids, text_lookup)
+    - results: files needing re-embedding (NEW / CHANGED / REPLACED)
+    - removal_ids: file_ids whose old chunks must be deleted
+    - text_lookup: {file_id: extracted_text} for sync_pipeline.sync_to_faiss
 
 Requires:
     - scripts/customer-support-agent-501616-534fe1748725.json (or GDRIVE_SA_FILE)
@@ -184,7 +190,7 @@ def extract_text(pdf_bytes: bytes, filename: str):
         return None
 
 
-def run() -> tuple[list[dict], list[dict]]:
+def run() -> tuple[list[dict], list[str], dict[str, str]]:
     folder_id = _folder_id()
     if not folder_id:
         raise SystemExit(
@@ -208,7 +214,8 @@ def run() -> tuple[list[dict], list[dict]]:
 
     sync_state = load_sync_state()
     results: list[dict] = []
-    removals: list[dict] = []
+    removal_ids: list[str] = []
+    text_lookup: dict[str, str] = {}
     unchanged_count = 0
 
     current_file_ids = {file_meta["id"] for file_meta in files}
@@ -259,16 +266,8 @@ def run() -> tuple[list[dict], list[dict]]:
         if prior is None and name in orphaned_by_name:
             old_file_id = orphaned_by_name.pop(name)
             orphaned_ids.discard(old_file_id)
-            old_entry = sync_state.pop(old_file_id)
-            old_chunk_count = int(old_entry.get("chunk_count", 0))
-            removals.append(
-                {
-                    "file_id": old_file_id,
-                    "name": old_entry.get("name", name),
-                    "reason": "REPLACED",
-                    "chunk_ids": chunk_ids_for_file(old_file_id, old_chunk_count),
-                }
-            )
+            sync_state.pop(old_file_id)
+            removal_ids.append(old_file_id)
             status = "REPLACED"
             print(
                 f"  OK    {name}: REPLACED (old file_id {old_file_id} reconciled by name), "
@@ -282,20 +281,13 @@ def run() -> tuple[list[dict], list[dict]]:
             )
         else:
             status = "CHANGED"
-            old_chunk_count = int(prior.get("chunk_count", 0))
-            removals.append(
-                {
-                    "file_id": file_id,
-                    "name": name,
-                    "reason": "CHANGED",
-                    "chunk_ids": chunk_ids_for_file(file_id, old_chunk_count),
-                }
-            )
+            removal_ids.append(file_id)
             print(
                 f"  OK    {status}, extracted {len(text)} chars, "
                 f"{len(chunks)} chunk(s), hash {new_hash[:10]}..."
             )
 
+        text_lookup[file_id] = text
         results.append(
             {
                 "file_id": file_id,
@@ -305,7 +297,6 @@ def run() -> tuple[list[dict], list[dict]]:
                 "hash": new_hash,
                 "status": status,
                 "chunk_count": len(chunks),
-                "chunks": chunks,
             }
         )
         sync_state[file_id] = {
@@ -319,14 +310,7 @@ def run() -> tuple[list[dict], list[dict]]:
         entry = sync_state.pop(file_id)
         name = entry.get("name", file_id)
         chunk_count = int(entry.get("chunk_count", 0))
-        removals.append(
-            {
-                "file_id": file_id,
-                "name": name,
-                "reason": "DELETED",
-                "chunk_ids": chunk_ids_for_file(file_id, chunk_count),
-            }
-        )
+        removal_ids.append(file_id)
         print(
             f"DELETED  {name}: removed from sync (file_id {file_id}, {chunk_count} stale chunk(s))"
         )
@@ -336,10 +320,10 @@ def run() -> tuple[list[dict], list[dict]]:
     total_chunks = sum(r["chunk_count"] for r in results)
     print(
         f"\nDone. {len(results)} new/changed/replaced ({total_chunks} chunk(s)), "
-        f"{len(removals)} removed, {unchanged_count} unchanged (skipped), "
+        f"{len(removal_ids)} removed, {unchanged_count} unchanged (skipped), "
         f"out of {len(files)} total PDF(s)."
     )
-    return results, removals
+    return results, removal_ids, text_lookup
 
 
 def main() -> int:

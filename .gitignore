@@ -16,6 +16,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 reports/
+# Drive sync pipeline outputs (generated locally; run sync_pipeline.py)
+faiss_index.bin
+chunk_store.db
 data/feedback/*.jsonl
 data/gdrive_sync_state.json
 # Google Drive service account (never commit)

@@ -1,7 +1,9 @@
-"""Load knowledge-base files, embed chunks, and search with FAISS."""
+"""Load Drive-synced FAISS index + chunk store and search for RAG retrieval."""
 
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,14 +11,35 @@ import faiss
 
 from app.core.config import AppSettings
 from app.core.logger import get_logger
-from app.retrieval.chunking import chunk_text_by_tokens
-from app.retrieval.embeddings import embed_texts
 
 logger = get_logger(__name__)
 
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
+
+
+def _ensure_scripts_importable() -> None:
+    root = str(_project_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+
+def _resolve_pipeline_path(env_var: str, default_name: str) -> str:
+    raw = os.environ.get(env_var, default_name).strip() or default_name
+    path = Path(raw)
+    if not path.is_absolute():
+        path = _project_root() / path
+    return str(path.resolve())
+
+
+def _configure_pipeline_env() -> tuple[str, str]:
+    """Ensure FAISS/chunk paths resolve to repo root regardless of process cwd."""
+    index_path = _resolve_pipeline_path("FAISS_INDEX_PATH", "faiss_index.bin")
+    db_path = _resolve_pipeline_path("CHUNK_STORE_DB", "chunk_store.db")
+    os.environ["FAISS_INDEX_PATH"] = index_path
+    os.environ["CHUNK_STORE_DB"] = db_path
+    return index_path, db_path
 
 
 @dataclass(frozen=True)
@@ -26,46 +49,76 @@ class IndexedChunk:
 
 
 class FaissKnowledgeIndex:
-    """In-memory FAISS index (IndexFlatIP) over L2-normalized chunk embeddings."""
+    """FAISS IndexIDMap (Drive sync pipeline) over chunk_store metadata."""
 
     def __init__(self) -> None:
-        self._index: faiss.IndexFlatIP | None = None
-        self._chunks: list[IndexedChunk] = []
-        self._vector_dim: int = 0
+        self._index: faiss.IndexIDMap | None = None
+        self._index_path: str = ""
 
     @property
     def chunk_count(self) -> int:
-        return len(self._chunks)
-
-    def _set_empty_index(self, settings: AppSettings) -> None:
-        probe = embed_texts([" "], settings.embedding_model_id)
-        self._vector_dim = int(probe.shape[1])
-        self._index = faiss.IndexFlatIP(self._vector_dim)
-        self._chunks = []
+        if self._index is None:
+            return 0
+        return int(self._index.ntotal)
 
     def build(self, settings: AppSettings) -> None:
-        kb_root = (_project_root() / settings.knowledge_base_dir).resolve()
-        texts, sources = _load_and_chunk_documents(kb_root, settings)
-        if not texts:
-            logger.warning(
-                "knowledge_index_empty",
-                extra={"structured": {"kb_dir": str(kb_root)}},
-            )
-            self._set_empty_index(settings)
-            return
+        """Load persisted Drive-sync index at startup (not per-query)."""
+        _ensure_scripts_importable()
+        from scripts import chunk_store as pipeline_chunk_store
+        from scripts import embedder as pipeline_embedder
+        from scripts import faiss_store as pipeline_faiss_store
 
-        vectors = embed_texts(texts, settings.embedding_model_id)
-        self._vector_dim = int(vectors.shape[1])
-        self._index = faiss.IndexFlatIP(self._vector_dim)
-        self._index.add(vectors)
-        self._chunks = [IndexedChunk(text=t, source_relpath=s) for t, s in zip(texts, sources)]
+        index_path, db_path = _configure_pipeline_env()
+        self._index_path = index_path
+
+        if not os.path.isfile(index_path):
+            raise FileNotFoundError(
+                f"FAISS index not found at {index_path!r}. "
+                "Run the Google Drive sync pipeline first "
+                "(e.g. python scripts/sync_pipeline.py after gdrive_kb sync) "
+                "to build faiss_index.bin and chunk_store.db."
+            )
+        if not os.path.isfile(db_path):
+            raise FileNotFoundError(
+                f"Chunk store not found at {db_path!r}. "
+                "Run the Google Drive sync pipeline first to build chunk_store.db."
+            )
+
+        pipeline_model_id = (
+            os.environ.get("EMBEDDING_MODEL_ID", "BAAI/bge-base-en-v1.5").strip()
+            or "BAAI/bge-base-en-v1.5"
+        )
+        app_model_id = settings.embedding_model_id.strip() or pipeline_model_id
+        if app_model_id != pipeline_model_id:
+            raise RuntimeError(
+                "Embedding model mismatch: AppSettings.embedding_model_id="
+                f"{app_model_id!r} but the Drive sync pipeline uses "
+                f"scripts/embedder.py with EMBEDDING_MODEL_ID={pipeline_model_id!r}. "
+                "Query and index vectors must use the same model or similarity search "
+                "will silently return garbage results."
+            )
+
+        dim = pipeline_embedder.get_embedding_dim()
+
+        self._index = pipeline_faiss_store.load_index(index_path, dim=dim)
+        if self._index.ntotal == 0:
+            raise RuntimeError(
+                f"FAISS index at {index_path!r} is empty. Re-run the Drive sync pipeline."
+            )
+
+        stored_chunks = pipeline_chunk_store.get_chunk_count()
         logger.info(
-            "knowledge_index_built",
+            "knowledge_index_loaded",
             extra={
                 "structured": {
-                    "kb_dir": str(kb_root),
-                    "chunk_count": len(self._chunks),
-                    "embedding_model": settings.embedding_model_id,
+                    "faiss_index_path": index_path,
+                    "chunk_store_path": db_path,
+                    "faiss_vector_count": int(self._index.ntotal),
+                    "chunk_store_row_count": stored_chunks,
+                    "embedding_model": os.environ.get(
+                        "EMBEDDING_MODEL_ID", "BAAI/bge-base-en-v1.5"
+                    ),
+                    "embedding_dim": dim,
                 }
             },
         )
@@ -73,87 +126,60 @@ class FaissKnowledgeIndex:
     def search(self, query: str, settings: AppSettings) -> list[str]:
         if self._index is None or self._index.ntotal == 0:
             return []
+
+        _ensure_scripts_importable()
+        from scripts import chunk_store as pipeline_chunk_store
+        from scripts import embedder as pipeline_embedder
+        from scripts import faiss_store as pipeline_faiss_store
+
         top_k = min(settings.rag_top_k, self._index.ntotal)
-        q = embed_texts([query], settings.embedding_model_id)
-        _scores, indices = self._index.search(q, top_k)
+        query_vector = pipeline_embedder.embed_texts([query])[0]
+        hits = pipeline_faiss_store.search(self._index, query_vector, k=top_k)
+
         out: list[str] = []
-        for idx in indices[0]:
-            i = int(idx)
-            if i < 0 or i >= len(self._chunks):
+        for chunk_id, _distance in hits:
+            meta = pipeline_chunk_store.get_chunk_text(chunk_id)
+            if meta is None:
+                logger.warning(
+                    "knowledge_index_dangling_chunk_id",
+                    extra={
+                        "structured": {
+                            "chunk_id": chunk_id,
+                            "faiss_index_path": self._index_path,
+                        }
+                    },
+                )
                 continue
-            ch = self._chunks[i]
-            header = f"(source: {ch.source_relpath})"
-            out.append(f"{header}\n{ch.text}")
+            source_name = str(meta["source_name"])
+            text = str(meta["text"])
+            header = f"(source: {source_name})"
+            out.append(f"{header}\n{text}")
         return out
+
+
+# ---------------------------------------------------------------------------
+# TODO: old local-KB path preserved for rollback, remove once new pipeline is
+# confirmed stable in eval.
+#
+# from app.retrieval.chunking import chunk_text_by_tokens
+# from app.retrieval.embeddings import embed_texts
+#
+# def _load_and_chunk_documents(kb_root: Path, settings: AppSettings) -> tuple[list[str], list[str]]:
+#     ...
+#
+# Old FaissKnowledgeIndex used IndexFlatIP + in-memory IndexedChunk list built from
+# data/knowledge_base/*.md at startup via embed_texts(..., settings.embedding_model_id).
+# ---------------------------------------------------------------------------
 
 
 _kb_singleton: FaissKnowledgeIndex | None = None
 
 
-def _load_and_chunk_documents(kb_root: Path, settings: AppSettings) -> tuple[list[str], list[str]]:
-    if not kb_root.is_dir():
-        logger.warning(
-            "knowledge_base_missing",
-            extra={"structured": {"path": str(kb_root)}},
-        )
-        return [], []
-
-    max_t = settings.rag_chunk_size_tokens
-    ov = settings.rag_chunk_overlap_tokens
-    if ov >= max_t:
-        ov = max(0, max_t - 1)
-
-    texts_out: list[str] = []
-    sources_out: list[str] = []
-
-    patterns = ("*.md", "*.txt", "*.MD", "*.TXT")
-    seen: set[Path] = set()
-    files: list[Path] = []
-    for pattern in patterns:
-        for path in kb_root.rglob(pattern):
-            if path.is_file() and path.name != ".gitkeep" and path not in seen:
-                seen.add(path)
-                files.append(path)
-    files.sort(key=lambda p: str(p).lower())
-
-    for file_path in files:
-        try:
-            raw = file_path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            logger.warning(
-                "knowledge_file_read_failed",
-                extra={"structured": {"path": str(file_path), "error": str(exc)}},
-            )
-            continue
-        rel = str(file_path.relative_to(kb_root)).replace("\\", "/")
-        for chunk in chunk_text_by_tokens(
-            raw,
-            max_tokens=max_t,
-            overlap_tokens=ov,
-        ):
-            texts_out.append(chunk)
-            sources_out.append(rel)
-    return texts_out, sources_out
-
-
 def rebuild_knowledge_index(settings: AppSettings) -> FaissKnowledgeIndex:
-    """Build (or rebuild) the global index from disk + config."""
+    """Load the global Drive-sync FAISS index from disk (startup only)."""
     global _kb_singleton
     index = FaissKnowledgeIndex()
-    try:
-        index.build(settings)
-    except Exception:
-        logger.exception(
-            "knowledge_index_build_failed",
-            extra={"structured": {"model": settings.embedding_model_id}},
-        )
-        index = FaissKnowledgeIndex()
-        try:
-            index._set_empty_index(settings)
-        except Exception:
-            logger.exception("knowledge_index_fallback_empty_failed")
-            index._index = None
-            index._chunks = []
+    index.build(settings)
     _kb_singleton = index
     return index
 
@@ -167,7 +193,7 @@ def format_rag_reply(chunks: list[str]) -> str:
     if not chunks:
         return (
             "[RAG] No passages matched your question in the knowledge base. "
-            "Add .md or .txt files under data/knowledge_base/."
+            "Run the Drive sync pipeline to populate faiss_index.bin and chunk_store.db."
         )
     parts = [f"### Match {i + 1}\n{c}" for i, c in enumerate(chunks)]
     return "Retrieved passages (raw):\n\n" + "\n\n".join(parts)
