@@ -54,6 +54,7 @@ def sync_to_faiss(
     results: list[dict],
     removals: list[str],
     text_lookup: dict[str, str],
+    skip_deletion: bool = False,
 ) -> None:
     """
     Sync chunk metadata and FAISS vectors from gdrive_kb.run() output.
@@ -61,20 +62,34 @@ def sync_to_faiss(
     results: files needing re-embedding (NEW / CHANGED / REPLACED)
     removals: file_ids whose old chunks must be deleted first
     text_lookup: file_id -> full extracted text for chunking
+    skip_deletion: when True, skip remove_chunks/delete_chunks_for_file calls
+        (simulates a naive sync that only ever adds). Default False — normal
+        production behavior. Used only by regression_stale_chunk_demo.py.
     """
     init_db()
     faiss_path = _faiss_index_path()
     index = load_index(faiss_path, dim=get_embedding_dim())
 
+    if skip_deletion:
+        print(
+            "\n*** skip_deletion=True — purging stale chunks is DISABLED "
+            "(demo / regression mode only) ***\n"
+        )
+
     for file_id in removals:
-        _purge_file_chunks(index, file_id)
+        if not skip_deletion:
+            _purge_file_chunks(index, file_id)
 
     files_added_or_updated = 0
     for file_entry in results:
         file_id = file_entry["file_id"]
         status = file_entry.get("status", "")
 
-        if status in ("CHANGED", "REPLACED") and get_chunk_ids_for_file(file_id):
+        if (
+            not skip_deletion
+            and status in ("CHANGED", "REPLACED")
+            and get_chunk_ids_for_file(file_id)
+        ):
             _purge_file_chunks(index, file_id)
 
         if file_id not in text_lookup:

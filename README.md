@@ -18,7 +18,7 @@
 | **API** | `POST /chat` — cache → intent → RAG or ticket path; `POST /feedback`; `GET /health` |
 | **Routing** | OpenAI `parse` → `question` \| `ticket` (no hand-written keyword routers) |
 | **RAG** | Chunk KB → embed → FAISS `IndexFlatIP`; top-k context → grounded completion |
-| **Drive KB sync** | Offline script: list Drive PDFs → extract text → paragraph chunks with stable IDs (Phase 1–2; not yet wired to chat RAG) |
+| **Drive KB sync** | Scheduled offline pipeline: Drive PDFs → chunk/embed → `faiss_index.bin` + `chunk_store.db`; chat API reads index at startup only |
 | **Tickets** | Mock `get_ticket(id)` → short narrative via LLM |
 | **Memory** | Per-user history + response cache (`MemoryStore`, default in-process) |
 | **Observability** | JSON **logs**; **`X-Request-ID`**; **LangSmith** traces; optional **Helicone** proxy for cost/latency dashboards ([screenshots](#live-integrations-screenshots)) |
@@ -48,8 +48,8 @@ flowchart LR
     TIX[Ticket LLM]
   end
   subgraph data [Data]
-    KB[(Markdown KB)]
-    FAISS[FAISS in-memory]
+    IDX[(faiss_index.bin)]
+    META[(chunk_store.db)]
     MOCK[Jira mock]
   end
   UI --> CHAT
@@ -57,88 +57,145 @@ flowchart LR
   CHAT --> CACHE
   CACHE -->|miss| INT
   INT -->|question| RET
-  RET --> FAISS
-  FAISS --> KB
+  RET --> IDX
+  RET --> META
   RET --> RAG
   INT -->|ticket| TIX
   TIX --> MOCK
 ```
 
-**Lifecycle:** App startup builds the in-memory index from `data/knowledge_base`. **Per turn:** cache lookup → on miss, intent → either `retrieve_rag_chunks` + `generate_rag_answer` or ticket path + `generate_ticket_narrative`.
+**Lifecycle:** App startup loads the persisted Drive-sync index via `rebuild_knowledge_index()` (`faiss_index.bin` + `chunk_store.db`). **Per turn:** cache lookup → on miss, intent → either `retrieve_rag_chunks` + `generate_rag_answer` or ticket path + `generate_ticket_narrative`. The API never calls Google Drive at request time.
 
-### Google Drive KB pipeline (offline, Phase 1–2)
+See [Real Data Integration: Google Drive KB Pipeline](#real-data-integration-google-drive-kb-pipeline) for the full ingestion/serving architecture, scheduled sync workflow, and design notes.
 
-Separate from the chat API: a sync script pulls PDFs from a shared Google Drive folder, extracts text, and chunks them for a future vector index. **Phase 3** (embed + FAISS persist) and **Phase 4** (wire into `POST /chat`) are not implemented yet.
+---
+
+## Real Data Integration: Google Drive KB Pipeline
+
+The chat API originally grounded answers in a small local Markdown knowledge base (`data/knowledge_base/sample_support.md`). That was fine for demos, but it hid the hard parts of real RAG: messy PDFs, incremental updates, and stale vectors after source edits. This pipeline replaces that fixture with PDFs from a shared Google Drive folder — extracted, chunked, embedded, and indexed offline — so the serving path exercises the same FAISS + metadata store the production sync job maintains.
+
+### Ingestion pipeline (offline / scheduled)
+
+Ingestion is a **separate process** from the live API. A scheduled GitHub Actions workflow (`.github/workflows/drive-sync.yml`, every 6 hours) or a manual `python scripts/run_full_sync.py` call chains `gdrive_kb.run()` → `sync_to_faiss(skip_deletion=False)` and commits the resulting artifacts to git.
 
 ```mermaid
 flowchart TD
-  subgraph setup [Setup]
-    ENV[.env: GDRIVE_FOLDER_ID]
-    SA[Service account JSON]
+  subgraph drive [Google Drive]
+    FOLDER[Shared PDF folder]
   end
-  subgraph sync [scripts/gdrive_kb.py]
-    LIST[List PDFs in folder]
-    STATE[Load sync state]
-    DIFF{Changed?}
+  subgraph ingest [scripts/gdrive_kb.py]
+    LIST[List and paginate PDFs]
+    STATE[Load data/gdrive_sync_state.json]
+    DIFF{Hash or modifiedTime changed?}
     DL[Download PDF]
-    EXT[Extract text pypdf]
-    HASH[SHA-256 hash]
-    CHK[chunk_text]
-    UPSERT[results: chunks to index]
-    REMOVE[removals: chunk_ids to delete]
+    EXT[Extract text via pypdf]
+    HASH[SHA-256 content hash]
+    CHUNK[chunk_text — paragraph chunks]
+    PLAN[results + removals + text_lookup]
     SAVE[Save sync state]
   end
-  subgraph chunker [scripts/chunker.py]
-    PARA[Split paragraphs]
-    GROUP[~400 char chunks + 50 char overlap]
-    ID[Deterministic chunk_id]
+  subgraph index [scripts/sync_pipeline.py]
+    PURGE[remove_ids for changed/deleted files]
+    EMB[embedder — BAAI/bge-base-en-v1.5]
+    ADD[add_with_ids to IndexIDMap]
+    META[(chunk_store.db — SQLite metadata)]
+    FAISS[(faiss_index.bin)]
   end
-  subgraph disk [On disk today]
-    SYNCJSON[data/gdrive_sync_state.json]
-  end
-  subgraph future [Phase 3+ not built]
-    EMB[Embed chunks]
-    IDX[(FAISS index)]
-    CHAT2[POST /chat RAG]
-  end
-  ENV --> LIST
-  SA --> LIST
-  LIST --> STATE
-  STATE --> DIFF
+  FOLDER --> LIST
+  LIST --> STATE --> DIFF
   DIFF -->|unchanged| SAVE
-  DIFF -->|new/changed| DL
-  DL --> EXT --> HASH --> CHK
-  CHK --> PARA --> GROUP --> ID
-  ID --> UPSERT
-  ID --> REMOVE
-  UPSERT --> SAVE
-  REMOVE --> SAVE
-  SAVE --> SYNCJSON
-  UPSERT -.-> EMB
-  REMOVE -.-> IDX
-  EMB -.-> IDX
-  IDX -.-> CHAT2
+  DIFF -->|new/changed/deleted| DL --> EXT --> HASH --> CHUNK --> PLAN
+  PLAN --> PURGE --> EMB --> ADD
+  ADD --> META
+  ADD --> FAISS
+  PLAN --> SAVE
 ```
 
 | Step | Module | Output |
 |------|--------|--------|
-| **List & diff** | `gdrive_kb.py` | Skip unchanged PDFs via `modifiedTime` + content hash |
-| **Extract** | `gdrive_kb.py` | Plain text from each PDF (skip scanned/empty) |
-| **Chunk** | `chunker.py` | `{chunk_id, file_id, source_name, chunk_index, text}` |
+| **List & paginate** | `gdrive_kb.py` | All PDFs in `GDRIVE_FOLDER_ID` |
+| **Hash diff** | `gdrive_kb.py` | Skip unchanged files; detect `NEW` / `CHANGED` / `REPLACED` / `DELETED` |
+| **Extract & chunk** | `gdrive_kb.py`, `chunker.py` | `{chunk_id, file_id, source_name, chunk_index, text}` |
+| **Embed & index** | `sync_pipeline.py`, `embedder.py`, `faiss_store.py` | Vectors in `faiss_index.bin`; metadata in `chunk_store.db` |
 | **Sync ledger** | `data/gdrive_sync_state.json` | Per-file `hash`, `name`, `modified_time`, `chunk_count` |
-| **Upsert plan** | `run()` return `results` | New/changed/replaced files + full chunk list (in memory) |
-| **Removal plan** | `run()` return `removals` | `DELETED` / `REPLACED` / `CHANGED` + `chunk_ids` to drop |
 
-**Run sync (from repo root):**
+**Production entrypoint:** `scripts/run_full_sync.py` — no prompts, config from env vars (`GDRIVE_SA_FILE`, `GDRIVE_FOLDER_ID`, `SYNC_STATE_FILE`, `FAISS_INDEX_PATH`, `CHUNK_STORE_DB`), always `skip_deletion=False`, exits non-zero on any failure or chunk_store/FAISS count mismatch.
 
-```bash
-pip install -r requirements-dev.txt   # google-api-python-client, pypdf, python-dotenv
-python scripts/gdrive_kb.py --check   # verify Drive auth
-python scripts/gdrive_kb.py           # incremental sync
-python scripts/chunker.py             # standalone chunker demo
+**CI eval fixtures (intentional):** GitHub Actions CI does **not** call Drive. `scripts/build_ci_kb_fixtures.py` writes synthetic `faiss_index.bin` + `chunk_store.db` aligned with `app/eval/datasets/support_eval_v1.jsonl` so `run_eval` and `regression` stay deterministic without live Drive credentials.
+
+### Serving pipeline (live API)
+
+The FastAPI app loads the on-disk index once at startup and never touches Drive during requests. A Drive or ingestion failure leaves the last good index in place; the API keeps serving until a successful sync replaces the files.
+
+```mermaid
+flowchart LR
+  subgraph client [Client]
+    UI[React SPA]
+  end
+  subgraph api [FastAPI]
+    CHAT[POST /chat]
+    LIFESPAN[rebuild_knowledge_index at startup]
+  end
+  subgraph brain [Orchestration]
+    CACHE[Response cache]
+    INT[Intent LLM]
+    RET[rag_retrieval]
+    RAG[RAG LLM]
+    TIX[Ticket LLM]
+  end
+  subgraph disk [On disk — read only at runtime]
+    FAISS[(faiss_index.bin)]
+    META[(chunk_store.db)]
+  end
+  subgraph eval [Offline quality]
+    EVAL[run_eval + regression]
+    LS[LangSmith traces]
+  end
+  UI --> CHAT
+  LIFESPAN --> FAISS
+  LIFESPAN --> META
+  CHAT --> CACHE
+  CACHE -->|miss| INT
+  INT -->|question| RET
+  RET --> FAISS
+  RET --> META
+  RET --> RAG
+  INT -->|ticket| TIX
+  EVAL -.-> CHAT
+  CHAT -.-> LS
 ```
 
-Set `GDRIVE_FOLDER_ID` and place the service account JSON under `scripts/` (see `.env.example`). Share the Drive folder with the service account email. `gdrive_sync_state.json` is gitignored (local sync ledger only).
+### Why FAISS + manual delete-then-add, not a managed vector DB
+
+Plain FAISS indexes only support **add-by-position**; they have no native update or delete-by-id. This repo wraps `IndexFlatIP` in `IndexIDMap` so vectors carry custom integer IDs and the pipeline can call `add_with_ids` / `remove_ids`. FAISS stores **no metadata** (source filename, chunk text, file_id), so a parallel **SQLite** store (`chunk_store.db`) holds chunk text and provenance; retrieval joins FAISS neighbor IDs back to rows in that store.
+
+Purpose-built vector databases (Chroma, Qdrant, pgvector) handle upsert/delete natively and were considered. FAISS was chosen deliberately to work through the update/delete problem directly rather than have it abstracted away — which surfaces a real limitation at scale: **HNSW-style indexes do not support true deletion** and eventually require periodic full rebuilds. That does not affect this project's small PDF corpus (~33 vectors today), but it would matter well beyond it.
+
+### Incident: stale chunks after a document edit
+
+**Failure mode:** Editing a source PDF **in place** (same `file_id`, changed content) without removing old vectors leaves **both** old and new chunks retrievable. Similarity search may surface the stale chunk, producing answers that cite outdated values.
+
+**How it was reproduced:** `scripts/regression_stale_chunk_demo.py` runs a controlled demonstration. After a baseline sync (`skip_deletion=False`), the operator uploads a new version of `Current_Address_Rent_Agreement.pdf` via Drive "Manage versions" (same `file_id`), then the demo calls `sync_to_faiss(..., skip_deletion=True)` to simulate a naive add-only pipeline. Old rent chunks stay indexed alongside new ones.
+
+**Before/after evidence** (from real runs in this repo):
+
+| Phase | chunk_store rows | FAISS `ntotal` | `pdf-rent-updated-001` correctness | Report file |
+|-------|------------------|----------------|-------------------------------------|-------------|
+| Baseline (correct sync) | 33 | 33 | — | — |
+| Broken (`skip_deletion=True`) | *pending* | *pending* | *pending* | *pending* |
+| Fixed (`skip_deletion=False`) | *pending* | *pending* | *pending* | *pending* |
+
+> **TODO:** The baseline row comes from the first successful real Drive → FAISS sync (`S_M_AFZAL_HASHMI.pdf` — 19 chunks; `Current_Address_Rent_Agreement.pdf` — 14 chunks; `chunk_store` and FAISS both at **33**, sanity check PASS). The broken/fixed rows and `pdf-rent-updated-001` eval scores are **not yet** in `reports/` — run `python scripts/regression_stale_chunk_demo.py` end-to-end, add case `pdf-rent-updated-001` to `app/eval/datasets/support_eval_v1.jsonl`, and update this table with the resulting chunk counts, scores, and report filenames (e.g. `reports/eval_run_<timestamp>.jsonl`).
+
+**Permanent fix:** Production sync always calls `sync_to_faiss(..., skip_deletion=False)` via `scripts/run_full_sync.py`. Changed files are purged from FAISS and `chunk_store` by `file_id` before re-embedding. The standing eval case `pdf-rent-updated-001` (to be added when the demo is completed) will catch any future regression on this exact failure mode via the existing `regression` check in CI.
+
+### Eval harness maintenance
+
+When migrating the dataset from Markdown to PDF-grounded cases, an early draft of `support_eval_v1.jsonl` briefly contained **two rows sharing the id `pdf-hashmi-001`**, which surfaced as a data-quality issue during eval runs and was deduplicated before the baseline was captured. The harness also caught a fixture wording mismatch: `pdf-hashmi-001` scored **0.00** correctness in `reports/eval_run_20260707_180128.jsonl` (model cited "Senior AI Engineer" from ambiguous resume text) but **1.00** after tightening the question and CI fixture text in `reports/eval_run_20260707_180518.jsonl`.
+
+### What I'd do differently at larger scale
+
+At this scale, committing `faiss_index.bin`, `chunk_store.db`, and `data/gdrive_sync_state.json` directly to git (updated by the scheduled workflow) is the simplest way to keep the deployed API and the index in sync. At larger scale I would move index artifacts to **object storage** (S3/GCS) instead of git, switch from 6-hour polling to **Drive push notifications** once the API is publicly deployed, and adopt a **managed vector DB** once index size or query volume justifies operational simplicity over the manual FAISS + SQLite wrapper.
 
 ---
 
@@ -200,7 +257,7 @@ Open **http://127.0.0.1:5173**. Set `VITE_API_URL` if the API is not `http://127
 
 **Common optional variables:** `OPENAI_BASE_URL`, `OPENAI_INTENT_MODEL`, `OPENAI_RAG_QA_MODEL`, `OPENAI_TICKET_SUMMARY_MODEL`, `EMBEDDING_MODEL_ID`, `KNOWLEDGE_BASE_DIR`, `RAG_TOP_K`, `CORS_ORIGINS`, `LOG_LEVEL`
 
-**Google Drive KB sync (optional, offline script):** `GDRIVE_FOLDER_ID`, `GDRIVE_SA_FILE`, `SYNC_STATE_FILE` — see `.env.example` and [Google Drive KB pipeline](#google-drive-kb-pipeline-offline-phase-12).
+**Google Drive KB sync (offline / scheduled):** `GDRIVE_FOLDER_ID`, `GDRIVE_SA_FILE`, `SYNC_STATE_FILE`, `FAISS_INDEX_PATH`, `CHUNK_STORE_DB` — see `.env.example` and [Real Data Integration: Google Drive KB Pipeline](#real-data-integration-google-drive-kb-pipeline).
 
 **Offline eval judges:** `EVAL_RUN_JUDGES` (default on; `false` = routing-only, faster), `OPENAI_EVAL_JUDGE_MODEL` (optional; defaults to RAG QA model from config). See `.env.example`.
 
@@ -278,13 +335,20 @@ Draft eval JSONL from the review file: **`python -m app.eval.promote_feedback`**
 | `reports/` | **Not in git** — eval run outputs (`eval_run_*.jsonl`), see `.gitignore` |
 | `configs/config.yaml` | Non-secret defaults |
 | `docs/screenshots/` | README figures: **UI**, LangSmith trace, Helicone dashboard |
-| `.github/workflows/ci.yml` | **GitHub Actions:** Ruff, frontend build, `run_eval` + `regression` (**`OPENAI_API_KEY`** secret; CI sets **`HELICONE_ENABLED=false`** so eval hits OpenAI directly) |
+| `.github/workflows/ci.yml` | **GitHub Actions:** Ruff, frontend build, `build_ci_kb_fixtures` + `run_eval` + `regression` (**`OPENAI_API_KEY`** secret; CI sets **`HELICONE_ENABLED=false`** so eval hits OpenAI directly) |
+| `.github/workflows/drive-sync.yml` | **Scheduled Drive sync:** every 6 h + manual dispatch; runs `run_full_sync.py`, commits `faiss_index.bin`, `chunk_store.db`, `data/gdrive_sync_state.json` if changed |
 | `requirements-dev.txt` | Ruff (CI lint) + Drive sync deps (`google-api-python-client`, `pypdf`, …) |
 | `data/feedback/` | Runtime **`events.jsonl`** / **`review_queue.jsonl`** (gitignored); **`.gitkeep`** only in git |
-| `data/knowledge_base/` | RAG sources (Markdown/text) for chat API |
-| `data/gdrive_sync_state.json` | Drive sync ledger (gitignored; `hash`, `chunk_count` per PDF) |
+| `data/knowledge_base/` | Legacy Markdown sources (superseded by Drive-sync index for RAG) |
+| `data/gdrive_sync_state.json` | Drive sync ledger (`hash`, `chunk_count` per PDF); updated by scheduled sync workflow |
+| `faiss_index.bin` | Persisted FAISS `IndexIDMap` (committed by `drive-sync.yml` when changed) |
+| `chunk_store.db` | SQLite chunk metadata store (committed by `drive-sync.yml` when changed) |
 | `scripts/gdrive_kb.py` | Drive PDF list → download → extract → chunk; returns `results` + `removals` |
 | `scripts/chunker.py` | Paragraph-aware chunker with deterministic `chunk_id`s |
+| `scripts/sync_pipeline.py` | Chunk → embed → FAISS add/remove; `skip_deletion` flag for regression demo only |
+| `scripts/run_full_sync.py` | Production entrypoint: `gdrive_kb.run()` → `sync_to_faiss(skip_deletion=False)` |
+| `scripts/build_ci_kb_fixtures.py` | CI-only synthetic index (no Drive API) |
+| `scripts/regression_stale_chunk_demo.py` | Controlled stale-chunk regression demonstration |
 | `frontend/` | React UI |
 | `plan.txt` | Build phases |
 | `llmops_plan.txt` | LLMOps / eval roadmap (reference) |
@@ -442,7 +506,6 @@ There is no built-in **Prometheus** exporter; you would aggregate from logs or a
 
 - Default **in-memory** store (no durable Redis in the hot path).
 - **Mock** tickets only.
-- **Drive PDFs** are synced and chunked offline but **not** yet searchable from `POST /chat` (Phase 3–4).
 - Automated tests are minimal; pair **`run_eval`** and LangSmith as described under **Observability & evaluation**.
 
 ---
