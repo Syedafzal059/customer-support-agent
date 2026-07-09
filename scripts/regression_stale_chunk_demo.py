@@ -23,12 +23,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import gdrive_kb  # noqa: E402
 from chunk_store import get_chunk_count, init_db  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 from embedder import get_embedding_dim  # noqa: E402
 from faiss_store import load_index  # noqa: E402
-
-import gdrive_kb  # noqa: E402
 from sync_pipeline import sync_to_faiss  # noqa: E402
 
 RENT_PDF_NAME = "Current_Address_Rent_Agreement.pdf"
