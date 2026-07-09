@@ -79,10 +79,7 @@ def _find_rent_entry(results: list[dict]) -> dict | None:
 
 def _print_eval_case_instructions() -> None:
     _subheading("Manual step: add eval case")
-    print(
-        f"Add a new line to {_project_root() / EVAL_DATASET} with id "
-        f'"{EVAL_CASE_ID}":\n'
-    )
+    print(f'Add a new line to {_project_root() / EVAL_DATASET} with id "{EVAL_CASE_ID}":\n')
     example = {
         "id": EVAL_CASE_ID,
         "message": "What is the monthly rent in the lease agreement?",
@@ -119,9 +116,7 @@ def _print_eval_run_instructions(phase_label: str, expectation: str) -> None:
     print("From the repo root, run:\n")
     print("    python -m app.eval.run_eval\n")
     print(f"Expected for {EVAL_CASE_ID}: {expectation}\n")
-    print(
-        "Note the report path printed at the end (reports/eval_run_<timestamp>.jsonl).\n"
-    )
+    print("Note the report path printed at the end (reports/eval_run_<timestamp>.jsonl).\n")
 
 
 def _prompt_eval_report(phase_label: str) -> tuple[str | None, float | None]:
@@ -285,7 +280,9 @@ def main() -> int:
     )
     broken_report, broken_score = _prompt_eval_report("BROKEN")
     if broken_report:
-        print(f"\nBROKEN-STATE REPORT: {broken_report} — keep this file, it's your 'before' evidence.")
+        print(
+            f"\nBROKEN-STATE REPORT: {broken_report} — keep this file, it's your 'before' evidence."
+        )
 
     # ── STEP D: fixed sync ──────────────────────────────────────────────
     _banner("STEP D — Apply the real fix (correct sync)")
@@ -329,8 +326,7 @@ def main() -> int:
         "REMINDER: This script used skip_deletion=True to simulate a naive sync. "
         "Production sync_pipeline.py calls always use skip_deletion=False "
         "(the default) — this flag exists only for this demonstration and must "
-        "never be used in the real Drive sync job.\n"
-        + "=" * 72
+        "never be used in the real Drive sync job.\n" + "=" * 72
     )
     return 0
 
